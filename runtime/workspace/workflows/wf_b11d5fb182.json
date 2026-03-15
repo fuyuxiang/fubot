@@ -1,0 +1,103 @@
+{
+  "workflow": {
+    "id": "wf_b11d5fb182",
+    "session_key": "cli:direct",
+    "channel": "cli",
+    "chat_id": "direct",
+    "user_message": "你使用的哪个大模型",
+    "status": "completed",
+    "task_ids": [
+      "task_c87877af"
+    ],
+    "assignment_ids": [
+      "assign_257854ed"
+    ],
+    "shared_board": {
+      "user_message": "你使用的哪个大模型",
+      "media": [],
+      "generalist": {
+        "content": "关于我底层使用的大语言模型，我实际上**无法确定具体是哪一个**。\n\n作为 fubot 框架，我是一个协调器系统，负责：\n- 理解你的请求\n- 调用各种工具（文件操作、网络搜索、命令执行等）\n- 组织回复\n\n但我底层调用的大语言模型是由运行时配置决定的，这个信息对我是透明的。可能是本地运行的模型，也可能是远程 API 提供的模型。\n\n如果你想知道具体配置，可以查看 fubot 的配置文件，或者告诉我你想了解什么，我可以直接帮你完成任务！😊\n\n有什么我可以帮你的吗？",
+        "route": {
+          "agent_id": "generalist",
+          "agent_name": "Generalist",
+          "agent_role": "assistant",
+          "task_type": "communication",
+          "model": "qwen3.5-plus",
+          "provider": "custom",
+          "reason": "task=communication; role=assistant; tool_allowlist=10",
+          "fallback_chain": [
+            "qwen3.5-plus"
+          ],
+          "health_score": 1.0,
+          "current_load": 1,
+          "created_at": "2026-03-15T02:26:18.181626+00:00"
+        },
+        "tools_used": []
+      }
+    },
+    "execution_logs": [
+      {
+        "workflow_id": "wf_b11d5fb182",
+        "task_id": "task_c87877af",
+        "agent_id": "generalist",
+        "agent_name": "Generalist",
+        "agent_role": "assistant",
+        "message_kind": "result",
+        "content": "关于我底层使用的大语言模型，我实际上**无法确定具体是哪一个**。\n\n作为 fubot 框架，我是一个协调器系统，负责：\n- 理解你的请求\n- 调用各种工具（文件操作、网络搜索、命令执行等）\n- 组织回复\n\n但我底层调用的大语言模型是由运行时配置决定的，这个信息对我是透明的。可能是本地运行的模型，也可能是远程 API 提供的模型。\n\n如果你想知道具体配置，可以查看 fubot 的配置文件，或者告诉我你想了解什么，我可以直接帮你完成任务！😊\n\n有什么我可以帮你的吗？",
+        "is_final": false,
+        "created_at": "2026-03-15T02:26:25.160453+00:00"
+      }
+    ],
+    "artifacts": [],
+    "final_response": "关于我底层使用的大语言模型，我实际上**无法确定具体是哪一个**。\n\n作为 fubot 框架，我是一个协调器系统，负责：\n- 理解你的请求\n- 调用各种工具（文件操作、网络搜索、命令执行等）\n- 组织回复\n\n但我底层调用的大语言模型是由运行时配置决定的，这个信息对我是透明的。可能是本地运行的模型，也可能是远程 API 提供的模型。\n\n如果你想知道具体配置，可以查看 fubot 的配置文件，或者告诉我你想了解什么，我可以直接帮你完成任务！😊\n\n有什么我可以帮你的吗？",
+    "created_at": "2026-03-15T02:26:18.173894+00:00",
+    "updated_at": "2026-03-15T02:26:25.161276+00:00"
+  },
+  "tasks": [
+    {
+      "id": "task_c87877af",
+      "workflow_id": "wf_b11d5fb182",
+      "title": "Generalist communication",
+      "kind": "communication",
+      "status": "completed",
+      "assigned_agent_id": "generalist",
+      "assigned_agent_name": "Generalist",
+      "route": {
+        "agent_id": "generalist",
+        "agent_name": "Generalist",
+        "agent_role": "assistant",
+        "task_type": "communication",
+        "model": "qwen3.5-plus",
+        "provider": "custom",
+        "reason": "task=communication; role=assistant; tool_allowlist=10",
+        "fallback_chain": [
+          "qwen3.5-plus"
+        ],
+        "health_score": 1.0,
+        "current_load": 1,
+        "created_at": "2026-03-15T02:26:18.181626+00:00"
+      },
+      "summary": "关于我底层使用的大语言模型，我实际上**无法确定具体是哪一个**。\n\n作为 fubot 框架，我是一个协调器系统，负责：\n- 理解你的请求\n- 调用各种工具（文件操作、网络搜索、命令执行等）\n- 组织回复\n\n但我底层调用的大语言模型是由运行时配置决定的，这个信息对我是透明的。可能是本地运行的模型，也可能是远程 API 提供的模型。\n\n如果你想知道具体配置，可以查看 fubot 的配置文件，或者告诉我你想了解什么，我可以直接帮你完成任务！😊\n\n有什么我可以帮你的吗？",
+      "result": "关于我底层使用的大语言模型，我实际上**无法确定具体是哪一个**。\n\n作为 fubot 框架，我是一个协调器系统，负责：\n- 理解你的请求\n- 调用各种工具（文件操作、网络搜索、命令执行等）\n- 组织回复\n\n但我底层调用的大语言模型是由运行时配置决定的，这个信息对我是透明的。可能是本地运行的模型，也可能是远程 API 提供的模型。\n\n如果你想知道具体配置，可以查看 fubot 的配置文件，或者告诉我你想了解什么，我可以直接帮你完成任务！😊\n\n有什么我可以帮你的吗？",
+      "metadata": {
+        "input": "你使用的哪个大模型",
+        "media": []
+      },
+      "created_at": "2026-03-15T02:26:18.173946+00:00",
+      "updated_at": "2026-03-15T02:26:18.173950+00:00"
+    }
+  ],
+  "assignments": [
+    {
+      "id": "assign_257854ed",
+      "workflow_id": "wf_b11d5fb182",
+      "task_id": "task_c87877af",
+      "agent_id": "generalist",
+      "agent_name": "Generalist",
+      "agent_role": "assistant",
+      "status": "completed",
+      "created_at": "2026-03-15T02:26:18.173960+00:00",
+      "updated_at": "2026-03-15T02:26:18.173963+00:00"
+    }
+  ]
+}

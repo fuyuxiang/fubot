@@ -1,0 +1,28 @@
+{
+  "llm": {
+    "provider": "custom",
+    "base_url": "https://coding.dashscope.aliyuncs.com/v1",
+    "api_key": "",
+    "model_id": "qwen3.5-plus"
+  },
+  "agents": {
+    "defaults": {
+      "workspace": "/Users/fuyuxiang/Desktop/testt/fubot/runtime/workspace",
+      "provider": "auto",
+      "model": "",
+      "maxTokens": 8192,
+      "contextWindowTokens": 65536,
+      "temperature": 0.1,
+      "maxToolIterations": 40
+    }
+  },
+  "tools": {
+    "restrictToWorkspace": true
+  },
+  "observability": {
+    "showExecutorProgress": true,
+    "showRouteDecisions": true,
+    "weakChannelPrefixes": true,
+    "includeRouteReason": true
+  }
+}

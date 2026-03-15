@@ -1,0 +1,729 @@
+"""Agent loop: the core processing engine."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+import re
+import sys
+from contextlib import AsyncExitStack
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Awaitable, Callable
+
+from loguru import logger
+
+from fubot.agent.context import ContextBuilder
+from fubot.agent.memory import MemoryConsolidator
+from fubot.agent.subagent import SubagentManager
+from fubot.agent.tools.cron import CronTool
+from fubot.agent.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
+from fubot.agent.tools.message import MessageTool
+from fubot.agent.tools.registry import ToolRegistry
+from fubot.agent.tools.shell import ExecTool
+from fubot.agent.tools.spawn import SpawnTool
+from fubot.agent.tools.web import WebFetchTool, WebSearchTool
+from fubot.bus.events import InboundMessage, OutboundMessage
+from fubot.bus.queue import MessageBus
+from fubot.config.schema import AgentProfile, Config
+from fubot.orchestrator.models import ExecutionLogRecord
+from fubot.orchestrator.runtime import CoordinatorRuntime, ExecutorResult
+from fubot.orchestrator.store import WorkflowStore
+from fubot.providers.base import LLMProvider
+from fubot.session.manager import Session, SessionManager
+
+if TYPE_CHECKING:
+    from fubot.config.schema import ChannelsConfig, ExecToolConfig, WebSearchConfig
+    from fubot.cron.service import CronService
+
+
+class AgentLoop:
+    """
+    The agent loop is the core processing engine.
+
+    It:
+    1. Receives messages from the bus
+    2. Builds context with history, memory, skills
+    3. Calls the LLM
+    4. Executes tool calls
+    5. Sends responses back
+    """
+
+    _TOOL_RESULT_MAX_CHARS = 16_000
+
+    def __init__(
+        self,
+        bus: MessageBus,
+        provider: LLMProvider,
+        workspace: Path,
+        model: str | None = None,
+        max_iterations: int = 40,
+        context_window_tokens: int = 65_536,
+        web_search_config: WebSearchConfig | None = None,
+        web_proxy: str | None = None,
+        exec_config: ExecToolConfig | None = None,
+        cron_service: CronService | None = None,
+        restrict_to_workspace: bool = False,
+        session_manager: SessionManager | None = None,
+        mcp_servers: dict | None = None,
+        channels_config: ChannelsConfig | None = None,
+        runtime_config: Config | None = None,
+    ):
+        from fubot.config.schema import ExecToolConfig, WebSearchConfig
+
+        self.bus = bus
+        self.channels_config = channels_config
+        self.provider = provider
+        self.workspace = workspace
+        self.model = model or provider.get_default_model()
+        self.config = runtime_config or Config()
+        self.config.agents.defaults.workspace = str(workspace)
+        self.config.agents.defaults.model = self.model
+        self.max_iterations = max_iterations
+        self.context_window_tokens = context_window_tokens
+        self.web_search_config = web_search_config or WebSearchConfig()
+        self.config.tools.web.search = self.web_search_config
+        self.web_proxy = web_proxy
+        self.exec_config = exec_config or ExecToolConfig()
+        self.config.tools.exec = self.exec_config
+        self.cron_service = cron_service
+        self.restrict_to_workspace = restrict_to_workspace
+        self.config.tools.restrict_to_workspace = restrict_to_workspace
+        if channels_config is not None:
+            self.config.channels = channels_config
+
+        self.context = ContextBuilder(workspace)
+        self.sessions = session_manager or SessionManager(workspace)
+        self.tools = ToolRegistry()
+        self.subagents = SubagentManager(
+            provider=provider,
+            workspace=workspace,
+            bus=bus,
+            model=self.model,
+            web_search_config=self.web_search_config,
+            web_proxy=web_proxy,
+            exec_config=self.exec_config,
+            restrict_to_workspace=restrict_to_workspace,
+        )
+
+        self._running = False
+        self._mcp_servers = mcp_servers or {}
+        self._mcp_stack: AsyncExitStack | None = None
+        self._mcp_connected = False
+        self._mcp_connecting = False
+        self._active_tasks: dict[str, list[asyncio.Task]] = {}  # session_key -> tasks
+        self._processing_lock = asyncio.Lock()
+        self.workflow_store = WorkflowStore(
+            workspace=workspace,
+            workflow_dir_name=self.config.storage.workflow_dir,
+            health_file=self.config.storage.health_cache_file,
+        )
+        self.coordinator = CoordinatorRuntime(self.config, self.workflow_store)
+        self.memory_consolidator = MemoryConsolidator(
+            workspace=workspace,
+            provider=provider,
+            model=self.model,
+            sessions=self.sessions,
+            context_window_tokens=context_window_tokens,
+            build_messages=self.context.build_messages,
+            get_tool_definitions=self.tools.get_definitions,
+        )
+        self._register_default_tools()
+
+    def _register_default_tools(self) -> None:
+        """Register the default set of tools."""
+        self.tools = self._make_tool_registry()
+
+    def _make_tool_registry(
+        self,
+        tool_allowlist: list[str] | None = None,
+        send_callback: Callable[[OutboundMessage], Awaitable[None]] | None = None,
+    ) -> ToolRegistry:
+        """Create an isolated registry so concurrent executors do not share tool state."""
+        registry = ToolRegistry()
+        allowed_dir = self.workspace if self.restrict_to_workspace else None
+        inherited_send_callback = send_callback
+        base_message_tool = self.tools.get("message")
+        if inherited_send_callback is None and isinstance(base_message_tool, MessageTool):
+            inherited_send_callback = base_message_tool._send_callback
+        def _allowed(name: str) -> bool:
+            return not tool_allowlist or name in tool_allowlist
+
+        for cls in (ReadFileTool, WriteFileTool, EditFileTool, ListDirTool):
+            tool = cls(workspace=self.workspace, allowed_dir=allowed_dir)
+            if _allowed(tool.name):
+                registry.register(tool)
+        exec_tool = ExecTool(
+            working_dir=str(self.workspace),
+            timeout=self.exec_config.timeout,
+            restrict_to_workspace=self.restrict_to_workspace,
+            path_append=self.exec_config.path_append,
+        )
+        if _allowed(exec_tool.name):
+            registry.register(exec_tool)
+        web_search_tool = WebSearchTool(config=self.web_search_config, proxy=self.web_proxy)
+        if _allowed(web_search_tool.name):
+            registry.register(web_search_tool)
+        web_fetch_tool = WebFetchTool(proxy=self.web_proxy)
+        if _allowed(web_fetch_tool.name):
+            registry.register(web_fetch_tool)
+        message_tool = MessageTool(send_callback=inherited_send_callback or self.bus.publish_outbound)
+        if _allowed(message_tool.name):
+            registry.register(message_tool)
+        spawn_tool = SpawnTool(manager=self.subagents)
+        if _allowed(spawn_tool.name):
+            registry.register(spawn_tool)
+        if self.cron_service:
+            cron_tool = CronTool(self.cron_service)
+            if _allowed(cron_tool.name):
+                registry.register(cron_tool)
+        return registry
+
+    async def _connect_mcp(self) -> None:
+        """Connect to configured MCP servers (one-time, lazy)."""
+        if self._mcp_connected or self._mcp_connecting or not self._mcp_servers:
+            return
+        self._mcp_connecting = True
+        from fubot.agent.tools.mcp import connect_mcp_servers
+        try:
+            self._mcp_stack = AsyncExitStack()
+            await self._mcp_stack.__aenter__()
+            await connect_mcp_servers(self._mcp_servers, self.tools, self._mcp_stack)
+            self._mcp_connected = True
+        except BaseException as e:
+            logger.error("Failed to connect MCP servers (will retry next message): {}", e)
+            if self._mcp_stack:
+                try:
+                    await self._mcp_stack.aclose()
+                except Exception:
+                    logger.debug("Failed to close MCP stack after connection error")
+                self._mcp_stack = None
+        finally:
+            self._mcp_connecting = False
+
+    def _set_tool_context(
+        self,
+        channel: str,
+        chat_id: str,
+        message_id: str | None = None,
+        registry: ToolRegistry | None = None,
+    ) -> None:
+        """Update context for all tools that need routing info."""
+        active_registry = registry or self.tools
+        for name in ("message", "spawn", "cron"):
+            if tool := active_registry.get(name):
+                if hasattr(tool, "set_context"):
+                    tool.set_context(channel, chat_id, *([message_id] if name == "message" else []))
+
+    @staticmethod
+    def _strip_think(text: str | None) -> str | None:
+        """Remove <think>…</think> blocks that some models embed in content."""
+        if not text:
+            return None
+        return re.sub(r"<think>[\s\S]*?</think>", "", text).strip() or None
+
+    @staticmethod
+    def _tool_hint(tool_calls: list) -> str:
+        """Format tool calls as concise hint, e.g. 'web_search("query")'."""
+        def _fmt(tc):
+            args = (tc.arguments[0] if isinstance(tc.arguments, list) else tc.arguments) or {}
+            val = next(iter(args.values()), None) if isinstance(args, dict) else None
+            if not isinstance(val, str):
+                return tc.name
+            return f'{tc.name}("{val[:40]}…")' if len(val) > 40 else f'{tc.name}("{val}")'
+        return ", ".join(_fmt(tc) for tc in tool_calls)
+
+    async def _run_agent_loop(
+        self,
+        initial_messages: list[dict],
+        on_progress: Callable[..., Awaitable[None]] | None = None,
+        registry: ToolRegistry | None = None,
+        model: str | None = None,
+    ) -> tuple[str | None, list[str], list[dict]]:
+        """Run the agent iteration loop."""
+        messages = initial_messages
+        iteration = 0
+        final_content = None
+        tools_used: list[str] = []
+        active_registry = registry or self.tools
+        active_model = model or self.model
+
+        while iteration < self.max_iterations:
+            iteration += 1
+
+            tool_defs = active_registry.get_definitions()
+
+            response = await self.provider.chat_with_retry(
+                messages=messages,
+                tools=tool_defs,
+                model=active_model,
+            )
+
+            if response.has_tool_calls:
+                if on_progress:
+                    thought = self._strip_think(response.content)
+                    if thought:
+                        await on_progress(thought)
+                    await on_progress(self._tool_hint(response.tool_calls), tool_hint=True)
+
+                tool_call_dicts = [
+                    tc.to_openai_tool_call()
+                    for tc in response.tool_calls
+                ]
+                messages = self.context.add_assistant_message(
+                    messages, response.content, tool_call_dicts,
+                    reasoning_content=response.reasoning_content,
+                    thinking_blocks=response.thinking_blocks,
+                )
+
+                for tool_call in response.tool_calls:
+                    tools_used.append(tool_call.name)
+                    args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
+                    logger.info("Tool call: {}({})", tool_call.name, args_str[:200])
+                    result = await active_registry.execute(tool_call.name, tool_call.arguments)
+                    messages = self.context.add_tool_result(
+                        messages, tool_call.id, tool_call.name, result
+                    )
+            else:
+                clean = self._strip_think(response.content)
+                # Don't persist error responses to session history — they can
+                # poison the context and cause permanent 400 loops (#1303).
+                if response.finish_reason == "error":
+                    logger.error("LLM returned error: {}", (clean or "")[:200])
+                    final_content = clean or "Sorry, I encountered an error calling the AI model."
+                    break
+                messages = self.context.add_assistant_message(
+                    messages, clean, reasoning_content=response.reasoning_content,
+                    thinking_blocks=response.thinking_blocks,
+                )
+                final_content = clean
+                break
+
+        if final_content is None and iteration >= self.max_iterations:
+            logger.warning("Max iterations ({}) reached", self.max_iterations)
+            final_content = (
+                f"I reached the maximum number of tool call iterations ({self.max_iterations}) "
+                "without completing the task. You can try breaking the task into smaller steps."
+            )
+
+        return final_content, tools_used, messages
+
+    def _augment_system_prompt(
+        self,
+        base_prompt: str,
+        profile: AgentProfile,
+        workflow_id: str,
+        task_title: str,
+        shared_board: dict[str, Any],
+    ) -> str:
+        """Inject profile identity and workflow context into the executor prompt."""
+        profile_bits = []
+        if profile.identity:
+            profile_bits.append(profile.identity)
+        if profile.system_prompt:
+            profile_bits.append(profile.system_prompt)
+        profile_bits.append(f"Workflow ID: {workflow_id}")
+        profile_bits.append(f"Task: {task_title}")
+        if shared_board:
+            profile_bits.append(f"Shared Board Snapshot: {json.dumps(shared_board, ensure_ascii=False)}")
+        return "\n\n".join([base_prompt, *profile_bits])
+
+    async def _emit_workflow_update(
+        self,
+        record: ExecutionLogRecord,
+        channel: str,
+        chat_id: str,
+        local_progress: Callable[[str], Awaitable[None]] | None = None,
+    ) -> None:
+        """Expose executor progress to users without breaking legacy channels."""
+        prefix = f"[{record.agent_name}] "
+        content = prefix + record.content
+        if local_progress is not None:
+            await local_progress(content)
+        metadata = {
+            "_progress": True,
+            "_tool_hint": record.message_kind == "tool",
+            "agent_id": record.agent_id,
+            "agent_name": record.agent_name,
+            "agent_role": record.agent_role,
+            "workflow_id": record.workflow_id,
+            "task_id": record.task_id,
+            "message_kind": record.message_kind,
+            "is_final": record.is_final,
+        }
+        await self.bus.publish_outbound(
+            OutboundMessage(
+                channel=channel,
+                chat_id=chat_id,
+                content=content,
+                metadata=metadata,
+                agent_id=record.agent_id,
+                agent_name=record.agent_name,
+                agent_role=record.agent_role,
+                workflow_id=record.workflow_id,
+                task_id=record.task_id,
+                message_kind=record.message_kind,
+                is_final=record.is_final,
+            )
+        )
+
+    async def _execute_profile_task(
+        self,
+        profile: AgentProfile,
+        task: Any,
+        workflow_id: str,
+        session_key: str,
+        channel: str,
+        chat_id: str,
+        media: list[str] | None,
+        shared_board: dict[str, Any],
+        on_progress: Callable[[str, bool], Awaitable[None]] | None = None,
+    ) -> ExecutorResult:
+        """Run one executor profile against the current session history."""
+        session = self.sessions.get_or_create(session_key)
+        history = session.get_history(max_messages=0)
+        registry = self._make_tool_registry(tool_allowlist=profile.tool_allowlist)
+        self._set_tool_context(channel, chat_id, None, registry=registry)
+        message_tool = registry.get("message")
+        if isinstance(message_tool, MessageTool):
+            message_tool.start_turn()
+
+        initial_messages = self.context.build_messages(
+            history=history,
+            current_message=task.metadata.get("input", ""),
+            media=media,
+            channel=channel,
+            chat_id=chat_id,
+        )
+        initial_messages[0]["content"] = self._augment_system_prompt(
+            str(initial_messages[0]["content"]),
+            profile,
+            workflow_id,
+            task.title,
+            shared_board,
+        )
+
+        decision = self.coordinator.router.choose_model(profile, task.kind, task.metadata.get("input", ""))
+
+        async def _wrapped_progress(content: str, *, tool_hint: bool = False) -> None:
+            if on_progress:
+                await on_progress(content, tool_hint)
+
+        final_content, tools_used, all_messages = await self._run_agent_loop(
+            initial_messages,
+            on_progress=_wrapped_progress,
+            registry=registry,
+            model=decision.model,
+        )
+        if final_content is None:
+            final_content = "Executor finished without a final response."
+
+        return ExecutorResult(
+            profile=profile,
+            task=task,
+            content=final_content,
+            route=decision.to_dict(),
+            all_messages=all_messages,
+            tools_used=tools_used,
+            sent_direct_message=bool(isinstance(message_tool, MessageTool) and message_tool._sent_in_turn),
+        )
+
+    async def run(self) -> None:
+        """Run the agent loop, dispatching messages as tasks to stay responsive to /stop."""
+        self._running = True
+        await self._connect_mcp()
+        logger.info("Agent loop started")
+
+        while self._running:
+            try:
+                msg = await asyncio.wait_for(self.bus.consume_inbound(), timeout=1.0)
+            except asyncio.TimeoutError:
+                continue
+
+            cmd = msg.content.strip().lower()
+            if cmd == "/stop":
+                await self._handle_stop(msg)
+            elif cmd == "/restart":
+                await self._handle_restart(msg)
+            else:
+                task = asyncio.create_task(self._dispatch(msg))
+                self._active_tasks.setdefault(msg.session_key, []).append(task)
+                task.add_done_callback(lambda t, k=msg.session_key: self._active_tasks.get(k, []) and self._active_tasks[k].remove(t) if t in self._active_tasks.get(k, []) else None)
+
+    async def _handle_stop(self, msg: InboundMessage) -> None:
+        """Cancel all active tasks and subagents for the session."""
+        tasks = self._active_tasks.pop(msg.session_key, [])
+        cancelled = sum(1 for t in tasks if not t.done() and t.cancel())
+        for t in tasks:
+            try:
+                await t
+            except asyncio.CancelledError:
+                continue
+            except Exception as exc:
+                logger.debug("Task cleanup after stop failed: {}", exc)
+        sub_cancelled = await self.subagents.cancel_by_session(msg.session_key)
+        total = cancelled + sub_cancelled
+        content = f"Stopped {total} task(s)." if total else "No active task to stop."
+        await self.bus.publish_outbound(OutboundMessage(
+            channel=msg.channel, chat_id=msg.chat_id, content=content,
+        ))
+
+    async def _handle_restart(self, msg: InboundMessage) -> None:
+        """Restart the process in-place via os.execv."""
+        await self.bus.publish_outbound(OutboundMessage(
+            channel=msg.channel, chat_id=msg.chat_id, content="Restarting...",
+        ))
+
+        async def _do_restart():
+            await asyncio.sleep(1)
+            # Use -m fubot instead of sys.argv[0] for Windows compatibility
+            # (sys.argv[0] may be just "fubot" without full path on Windows)
+            os.execv(sys.executable, [sys.executable, "-m", "fubot"] + sys.argv[1:])
+
+        asyncio.create_task(_do_restart())
+
+    async def _dispatch(self, msg: InboundMessage) -> None:
+        """Process a message under the global lock."""
+        async with self._processing_lock:
+            try:
+                response = await self._process_message(msg)
+                if response is not None:
+                    await self.bus.publish_outbound(response)
+                elif msg.channel == "cli":
+                    await self.bus.publish_outbound(OutboundMessage(
+                        channel=msg.channel, chat_id=msg.chat_id,
+                        content="", metadata=msg.metadata or {},
+                    ))
+            except asyncio.CancelledError:
+                logger.info("Task cancelled for session {}", msg.session_key)
+                raise
+            except Exception:
+                logger.exception("Error processing message for session {}", msg.session_key)
+                await self.bus.publish_outbound(OutboundMessage(
+                    channel=msg.channel, chat_id=msg.chat_id,
+                    content="Sorry, I encountered an error.",
+                ))
+
+    async def close_mcp(self) -> None:
+        """Close MCP connections."""
+        if self._mcp_stack:
+            try:
+                await self._mcp_stack.aclose()
+            except (RuntimeError, BaseExceptionGroup):
+                pass  # MCP SDK cancel scope cleanup is noisy but harmless
+            self._mcp_stack = None
+
+    def stop(self) -> None:
+        """Stop the agent loop."""
+        self._running = False
+        logger.info("Agent loop stopping")
+
+    async def _process_message(
+        self,
+        msg: InboundMessage,
+        session_key: str | None = None,
+        on_progress: Callable[[str], Awaitable[None]] | None = None,
+    ) -> OutboundMessage | None:
+        """Process a single inbound message and return the response."""
+        # System messages: parse origin from chat_id ("channel:chat_id")
+        if msg.channel == "system":
+            channel, chat_id = (msg.chat_id.split(":", 1) if ":" in msg.chat_id
+                                else ("cli", msg.chat_id))
+            logger.info("Processing system message from {}", msg.sender_id)
+            key = f"{channel}:{chat_id}"
+            session = self.sessions.get_or_create(key)
+            await self.memory_consolidator.maybe_consolidate_by_tokens(session)
+            self._set_tool_context(channel, chat_id, msg.metadata.get("message_id"))
+            history = session.get_history(max_messages=0)
+            messages = self.context.build_messages(
+                history=history,
+                current_message=msg.content, channel=channel, chat_id=chat_id,
+            )
+            final_content, _, all_msgs = await self._run_agent_loop(messages)
+            self._save_turn(session, all_msgs, 1 + len(history))
+            self.sessions.save(session)
+            await self.memory_consolidator.maybe_consolidate_by_tokens(session)
+            return OutboundMessage(channel=channel, chat_id=chat_id,
+                                  content=final_content or "Background task completed.")
+
+        preview = msg.content[:80] + "..." if len(msg.content) > 80 else msg.content
+        logger.info("Processing message from {}:{}: {}", msg.channel, msg.sender_id, preview)
+
+        key = session_key or msg.session_key
+        session = self.sessions.get_or_create(key)
+
+        # Slash commands
+        cmd = msg.content.strip().lower()
+        if cmd == "/new":
+            try:
+                if not await self.memory_consolidator.archive_unconsolidated(session):
+                    return OutboundMessage(
+                        channel=msg.channel,
+                        chat_id=msg.chat_id,
+                        content="Memory archival failed, session not cleared. Please try again.",
+                    )
+            except Exception:
+                logger.exception("/new archival failed for {}", session.key)
+                return OutboundMessage(
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                    content="Memory archival failed, session not cleared. Please try again.",
+                )
+
+            session.clear()
+            self.sessions.save(session)
+            self.sessions.invalidate(session.key)
+            return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
+                                  content="New session started.")
+        if cmd == "/help":
+            lines = [
+                "🐈 fubot commands:",
+                "/new — Start a new conversation",
+                "/stop — Stop the current task",
+                "/restart — Restart the bot",
+                "/help — Show available commands",
+            ]
+            return OutboundMessage(
+                channel=msg.channel, chat_id=msg.chat_id, content="\n".join(lines),
+            )
+        await self.memory_consolidator.maybe_consolidate_by_tokens(session)
+
+        self._set_tool_context(msg.channel, msg.chat_id, msg.metadata.get("message_id"))
+        if message_tool := self.tools.get("message"):
+            if isinstance(message_tool, MessageTool):
+                message_tool.start_turn()
+
+        history = session.get_history(max_messages=0)
+
+        async def _bus_progress(content: str, *, tool_hint: bool = False) -> None:
+            meta = dict(msg.metadata or {})
+            meta["_progress"] = True
+            meta["_tool_hint"] = tool_hint
+            await self.bus.publish_outbound(
+                OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content, metadata=meta)
+            )
+
+        final_content: str | None
+        tools_used: list[str] = []
+        all_msgs: list[dict[str, Any]]
+        results: list[ExecutorResult] = []
+        save_skip = 0
+
+        if self.config.orchestration.enabled:
+            workflow, tasks, _assignments, results, final_content = await self.coordinator.run(
+                session_key=key,
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content=msg.content,
+                media=msg.media if msg.media else None,
+                execute_task=self._execute_profile_task,
+                emit_update=lambda record: self._emit_workflow_update(
+                    record,
+                    msg.channel,
+                    msg.chat_id,
+                    local_progress=on_progress,
+                ),
+            )
+            msg.metadata.setdefault("workflow_id", workflow.id)
+            if len(results) == 1:
+                all_msgs = results[0].all_messages
+                tools_used = results[0].tools_used
+                save_skip = 1 + len(history)
+            else:
+                all_msgs = [
+                    {
+                        "role": "assistant",
+                        "content": final_content,
+                        "metadata": {"workflow_id": workflow.id, "tasks": [task.id for task in tasks]},
+                    }
+                ]
+                save_skip = 0
+        else:
+            initial_messages = self.context.build_messages(
+                history=history,
+                current_message=msg.content,
+                media=msg.media if msg.media else None,
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+            )
+            final_content, tools_used, all_msgs = await self._run_agent_loop(
+                initial_messages,
+                on_progress=on_progress or _bus_progress,
+            )
+            save_skip = 1 + len(history)
+
+        if final_content is None:
+            final_content = "I've completed processing but have no response to give."
+
+        self._save_turn(session, all_msgs, save_skip)
+        self.sessions.save(session)
+        await self.memory_consolidator.maybe_consolidate_by_tokens(session)
+
+        if any(result.sent_direct_message for result in results):
+            return None
+        if not results and (mt := self.tools.get("message")) and isinstance(mt, MessageTool) and mt._sent_in_turn:
+            return None
+
+        preview = final_content[:120] + "..." if len(final_content) > 120 else final_content
+        logger.info("Response to {}:{}: {}", msg.channel, msg.sender_id, preview)
+        return OutboundMessage(
+            channel=msg.channel,
+            chat_id=msg.chat_id,
+            content=final_content,
+            metadata=msg.metadata or {},
+            agent_id=self.config.orchestration.coordinator.id if self.config.orchestration.enabled else None,
+            agent_name=self.config.orchestration.coordinator.name if self.config.orchestration.enabled else None,
+            agent_role=self.config.orchestration.coordinator.role if self.config.orchestration.enabled else None,
+            workflow_id=(msg.metadata or {}).get("workflow_id"),
+            message_kind="final",
+            is_final=True,
+        )
+
+    def _save_turn(self, session: Session, messages: list[dict], skip: int) -> None:
+        """Save new-turn messages into session, truncating large tool results."""
+        from datetime import datetime
+        for m in messages[skip:]:
+            entry = dict(m)
+            role, content = entry.get("role"), entry.get("content")
+            if role == "assistant" and not content and not entry.get("tool_calls"):
+                continue  # skip empty assistant messages — they poison session context
+            if role == "tool" and isinstance(content, str) and len(content) > self._TOOL_RESULT_MAX_CHARS:
+                entry["content"] = content[:self._TOOL_RESULT_MAX_CHARS] + "\n... (truncated)"
+            elif role == "user":
+                if isinstance(content, str) and content.startswith(ContextBuilder._RUNTIME_CONTEXT_TAG):
+                    # Strip the runtime-context prefix, keep only the user text.
+                    parts = content.split("\n\n", 1)
+                    if len(parts) > 1 and parts[1].strip():
+                        entry["content"] = parts[1]
+                    else:
+                        continue
+                if isinstance(content, list):
+                    filtered = []
+                    for c in content:
+                        if c.get("type") == "text" and isinstance(c.get("text"), str) and c["text"].startswith(ContextBuilder._RUNTIME_CONTEXT_TAG):
+                            continue  # Strip runtime context from multimodal messages
+                        if (c.get("type") == "image_url"
+                                and c.get("image_url", {}).get("url", "").startswith("data:image/")):
+                            filtered.append({"type": "text", "text": "[image]"})
+                        else:
+                            filtered.append(c)
+                    if not filtered:
+                        continue
+                    entry["content"] = filtered
+            entry.setdefault("timestamp", datetime.now().isoformat())
+            session.messages.append(entry)
+        session.updated_at = datetime.now()
+
+    async def process_direct(
+        self,
+        content: str,
+        session_key: str = "cli:direct",
+        channel: str = "cli",
+        chat_id: str = "direct",
+        on_progress: Callable[[str], Awaitable[None]] | None = None,
+    ) -> str:
+        """Process a message directly (for CLI or cron usage)."""
+        await self._connect_mcp()
+        msg = InboundMessage(channel=channel, sender_id="user", chat_id=chat_id, content=content)
+        response = await self._process_message(msg, session_key=session_key, on_progress=on_progress)
+        return response.content if response else ""
