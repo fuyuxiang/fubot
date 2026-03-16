@@ -1090,6 +1090,7 @@ def agent(
     from fubot.bus.queue import MessageBus
     from fubot.config.paths import get_cron_dir
     from fubot.cron.service import CronService
+    from fubot.orchestrator.router import ProviderExecutionError
 
     config = _load_runtime_config(config, workspace)
     _print_deprecated_memory_window_notice(config)
@@ -1143,12 +1144,26 @@ def agent(
     if message:
         # Single message mode — direct call, no bus needed
         async def run_once():
-            with _thinking_ctx():
-                response = await agent_loop.process_direct(message, session_id, on_progress=_cli_progress)
-            _print_agent_response(response, render_markdown=markdown)
-            await agent_loop.close_mcp()
+            try:
+                with _thinking_ctx():
+                    return await agent_loop.process_direct(
+                        message,
+                        session_id,
+                        on_progress=_cli_progress,
+                    )
+            finally:
+                await agent_loop.close_mcp()
 
-        asyncio.run(run_once())
+        try:
+            response = asyncio.run(run_once())
+        except ProviderExecutionError as exc:
+            console.print(f"[red]Agent failed:[/red] {exc}")
+            raise typer.Exit(1) from exc
+        except Exception as exc:
+            console.print(f"[red]Agent failed:[/red] {exc}")
+            raise typer.Exit(1) from exc
+
+        _print_agent_response(response, render_markdown=markdown)
     else:
         # Interactive mode — route through bus like other channels
         from fubot.bus.events import InboundMessage
@@ -1386,13 +1401,23 @@ def channels_login():
 
 
 @app.command()
-def status():
+def status(
+    config: str | None = typer.Option(None, "--config", "-c", help="Path to config file"),
+):
     """Show fubot status."""
-    from fubot.config.loader import get_config_path, load_config
+    from fubot.config.loader import get_config_path, load_config, set_config_path
 
-    config_path = get_config_path()
-    config = load_config()
-    workspace = config.workspace_path
+    if config:
+        config_path = Path(config).expanduser().resolve()
+        if not config_path.exists():
+            console.print(f"[red]Error: Config file not found: {config_path}[/red]")
+            raise typer.Exit(1)
+        set_config_path(config_path)
+        runtime_config = load_config(config_path)
+    else:
+        config_path = get_config_path()
+        runtime_config = load_config()
+    workspace = runtime_config.workspace_path
 
     console.print(f"{__logo__} fubot Status\n")
 
@@ -1402,23 +1427,32 @@ def status():
     if config_path.exists():
         from fubot.providers.registry import PROVIDERS
 
-        console.print(f"Model: {config.llm.model_id or config.agents.defaults.model}")
+        console.print(f"Model: {runtime_config.llm.model_id or runtime_config.agents.defaults.model}")
 
         # Check API keys from registry
         for spec in PROVIDERS:
-            p = getattr(config.providers, spec.name, None)
+            p = getattr(runtime_config.providers, spec.name, None)
+            llm_override_active = runtime_config.llm.provider == spec.name and bool(
+                runtime_config.llm.model_id or runtime_config.agents.defaults.model
+            )
+            effective_api_key = runtime_config.llm.api_key if llm_override_active else (
+                p.api_key if p else ""
+            )
+            effective_api_base = runtime_config.llm.base_url if llm_override_active else (
+                p.api_base if p else None
+            )
             if p is None:
                 continue
             if spec.is_oauth:
                 console.print(f"{spec.label}: [green]✓ (OAuth)[/green]")
-            elif spec.is_local:
+            elif spec.is_local or (llm_override_active and effective_api_base):
                 # Local deployments show api_base instead of api_key
-                if p.api_base:
-                    console.print(f"{spec.label}: [green]✓ {p.api_base}[/green]")
+                if effective_api_base:
+                    console.print(f"{spec.label}: [green]✓ {effective_api_base}[/green]")
                 else:
                     console.print(f"{spec.label}: [dim]not set[/dim]")
             else:
-                has_key = bool(p.api_key)
+                has_key = bool(effective_api_key)
                 console.print(f"{spec.label}: {'[green]✓[/green]' if has_key else '[dim]not set[/dim]'}")
 
 

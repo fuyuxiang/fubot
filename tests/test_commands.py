@@ -9,6 +9,7 @@ from typer.testing import CliRunner
 
 from fubot.cli.commands import app
 from fubot.config.schema import Config
+from fubot.orchestrator.router import ProviderExecutionError
 from fubot.providers.litellm_provider import LiteLLMProvider
 from fubot.providers.openai_codex_provider import _strip_model_prefix
 from fubot.providers.registry import find_by_model
@@ -411,6 +412,20 @@ def test_agent_warns_about_deprecated_memory_window(mock_agent_runtime):
     assert "contextWindowTokens" in result.stdout
 
 
+def test_agent_single_message_reports_provider_failure_without_traceback(mock_agent_runtime):
+    mock_agent_runtime["agent_loop"].process_direct = AsyncMock(
+        side_effect=ProviderExecutionError("Provider fallback exhausted", error_kind="connection")
+    )
+
+    result = runner.invoke(app, ["agent", "-m", "hello"])
+
+    assert result.exit_code == 1
+    assert "Agent failed:" in result.stdout
+    assert "Provider fallback exhausted" in result.stdout
+    assert "Traceback" not in result.stdout
+    mock_agent_runtime["agent_loop"].close_mcp.assert_awaited_once()
+
+
 def test_gateway_uses_workspace_from_config_by_default(monkeypatch, tmp_path: Path) -> None:
     config_file = tmp_path / "instance" / "config.json"
     config_file.parent.mkdir(parents=True)
@@ -579,3 +594,50 @@ def test_gateway_default_port_matches_compose_and_docs() -> None:
     assert f"EXPOSE {port}" in dockerfile
     assert f"- {port}:{port}" in compose
     assert f"`{port}`" in regression_doc
+
+
+def test_status_uses_explicit_config_path(monkeypatch, tmp_path: Path) -> None:
+    config_file = tmp_path / "instance" / "config.json"
+    config_file.parent.mkdir(parents=True)
+    config_file.write_text("{}")
+
+    config = Config()
+    config.agents.defaults.workspace = str(tmp_path / "status-workspace")
+    seen: dict[str, Path] = {}
+
+    monkeypatch.setattr(
+        "fubot.config.loader.set_config_path",
+        lambda path: seen.__setitem__("config_path", path),
+    )
+    monkeypatch.setattr("fubot.config.loader.load_config", lambda _path=None: config)
+
+    result = runner.invoke(app, ["status", "--config", str(config_file)])
+
+    assert result.exit_code == 0
+    assert seen["config_path"] == config_file.resolve()
+    stripped_output = _strip_ansi(result.stdout)
+    collapsed_output = stripped_output.replace("\n", "")
+    assert str(config_file.resolve()) in collapsed_output
+    assert str(config.workspace_path) in collapsed_output
+
+
+def test_status_reports_runtime_custom_provider_from_llm_config(monkeypatch, tmp_path: Path) -> None:
+    config_file = tmp_path / "instance" / "config.json"
+    config_file.parent.mkdir(parents=True)
+    config_file.write_text("{}")
+
+    config = Config()
+    config.llm.provider = "custom"
+    config.llm.base_url = "https://example.com/v1"
+    config.llm.api_key = "sk-test"
+    config.llm.model_id = "example-model"
+
+    monkeypatch.setattr("fubot.config.loader.set_config_path", lambda _path: None)
+    monkeypatch.setattr("fubot.config.loader.load_config", lambda _path=None: config)
+
+    result = runner.invoke(app, ["status", "--config", str(config_file)])
+
+    assert result.exit_code == 0
+    stripped_output = _strip_ansi(result.stdout)
+    assert "Model: example-model" in stripped_output
+    assert "Custom: ✓ https://example.com/v1" in stripped_output
