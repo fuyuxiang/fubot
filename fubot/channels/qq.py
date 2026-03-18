@@ -2,6 +2,7 @@
 
 import asyncio
 from collections import deque
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from loguru import logger
@@ -102,7 +103,7 @@ class QQChannel(BaseChannel):
         logger.info("QQ bot stopped")
 
     async def send(self, msg: OutboundMessage) -> None:
-        """Send a message through QQ."""
+        """Send a message through QQ, including file attachments."""
         if not self._client:
             logger.warning("QQ client not initialized")
             return
@@ -111,6 +112,37 @@ class QQChannel(BaseChannel):
             msg_id = msg.metadata.get("message_id")
             self._msg_seq += 1
             msg_type = self._chat_type_cache.get(msg.chat_id, "c2c")
+
+            # Send media files first
+            for media_path in msg.media or []:
+                try:
+                    file_path = Path(media_path)
+                    if not file_path.exists():
+                        logger.warning("QQ media file not found: {}", media_path)
+                        continue
+
+                    if msg_type == "group":
+                        await self._client.api.post_group_file(
+                            group_openid=msg.chat_id,
+                            file_type=1,  # 1 = file
+                            srv_send_msg=True,
+                            file=open(file_path, "rb"),
+                        )
+                    else:
+                        await self._client.api.post_c2c_file(
+                            openid=msg.chat_id,
+                            file_type=1,  # 1 = file
+                            srv_send_msg=True,
+                            file=open(file_path, "rb"),
+                        )
+                    logger.info("QQ file sent: {}", file_path.name)
+                except Exception as e:
+                    logger.error("Failed to send QQ file {}: {}", media_path, e)
+
+            # Send text content
+            if not msg.content or not msg.content.strip():
+                return
+
             if msg_type == "group":
                 await self._client.api.post_group_message(
                     group_openid=msg.chat_id,

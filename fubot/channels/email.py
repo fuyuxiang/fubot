@@ -3,15 +3,21 @@
 import asyncio
 import html
 import imaplib
+import os
 import re
 import smtplib
 import ssl
 from datetime import date
 from email import policy
+from email.encoders import encode_base64
 from email.header import decode_header, make_header
 from email.message import EmailMessage
+from email.mime.base import MIMEBase
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
 from email.parser import BytesParser
 from email.utils import parseaddr
+from pathlib import Path
 from typing import Any
 
 from loguru import logger
@@ -134,11 +140,42 @@ class EmailChannel(BaseChannel):
             if override:
                 subject = override
 
-        email_msg = EmailMessage()
-        email_msg["From"] = self.config.from_address or self.config.smtp_username or self.config.imap_username
-        email_msg["To"] = to_addr
-        email_msg["Subject"] = subject
-        email_msg.set_content(msg.content or "")
+        # Build email message with attachments if present
+        if msg.media:
+            # Use multipart for attachments
+            email_msg = MIMEMultipart()
+            email_msg["From"] = self.config.from_address or self.config.smtp_username or self.config.imap_username
+            email_msg["To"] = to_addr
+            email_msg["Subject"] = subject
+            email_msg.attach(MIMEText(msg.content or "", "plain", "utf-8"))
+
+            # Add attachments
+            for media_path in msg.media:
+                try:
+                    file_path = Path(media_path)
+                    if not file_path.exists():
+                        logger.warning("Email attachment not found: {}", media_path)
+                        continue
+
+                    filename = file_path.name
+                    with open(file_path, "rb") as f:
+                        part = MIMEBase("application", "octet-stream")
+                        part.set_payload(f.read())
+                    encode_base64(part)
+                    part.add_header(
+                        "Content-Disposition",
+                        f"attachment; filename= {filename}",
+                    )
+                    email_msg.attach(part)
+                    logger.info("Email attachment added: {}", filename)
+                except Exception as e:
+                    logger.error("Failed to add email attachment {}: {}", media_path, e)
+        else:
+            email_msg = EmailMessage()
+            email_msg["From"] = self.config.from_address or self.config.smtp_username or self.config.imap_username
+            email_msg["To"] = to_addr
+            email_msg["Subject"] = subject
+            email_msg.set_content(msg.content or "")
 
         in_reply_to = self._last_message_id_by_chat.get(to_addr)
         if in_reply_to:

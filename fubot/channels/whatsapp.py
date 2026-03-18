@@ -3,6 +3,7 @@
 import asyncio
 import json
 import mimetypes
+import os
 from collections import OrderedDict
 
 from loguru import logger
@@ -79,12 +80,41 @@ class WhatsAppChannel(BaseChannel):
             self._ws = None
 
     async def send(self, msg: OutboundMessage) -> None:
-        """Send a message through WhatsApp."""
+        """Send a message through WhatsApp, including file attachments."""
         if not self._ws or not self._connected:
             logger.warning("WhatsApp bridge not connected")
             return
 
         try:
+            # Send media files first if present
+            for media_path in msg.media or []:
+                try:
+                    if not os.path.exists(media_path):
+                        logger.warning("WhatsApp media file not found: {}", media_path)
+                        continue
+
+                    # Determine media type based on extension
+                    ext = media_path.lower().split('.')[-1] if '.' in media_path else ''
+                    media_type = "image" if ext in ('jpg', 'jpeg', 'png', 'gif', 'webp') else \
+                                 "video" if ext in ('mp4', 'avi', 'mov', 'webm') else \
+                                 "audio" if ext in ('mp3', 'wav', 'ogg', 'm4a') else \
+                                 "document"
+
+                    payload = {
+                        "type": "send_file",
+                        "to": msg.chat_id,
+                        "file": media_path,
+                        "media_type": media_type,
+                    }
+                    await self._ws.send(json.dumps(payload, ensure_ascii=False))
+                    logger.info("WhatsApp file sent: {}", media_path)
+                except Exception as e:
+                    logger.error("Failed to send WhatsApp file {}: {}", media_path, e)
+
+            # Send text content if present
+            if not msg.content or not msg.content.strip():
+                return
+
             payload = {
                 "type": "send",
                 "to": msg.chat_id,

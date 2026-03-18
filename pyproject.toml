@@ -1,7 +1,7 @@
 [project]
-name = "fubot-ai"
+name = "fubot"
 version = "0.2.0"
-description = "A local-first multi-agent assistant framework"
+description = "A lightweight AI assistant system designed to run on your own device or private server."
 requires-python = ">=3.11"
 license = {text = "MIT"}
 authors = [
