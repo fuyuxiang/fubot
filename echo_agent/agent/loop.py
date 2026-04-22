@@ -181,7 +181,7 @@ class AgentLoop:
             self.tracer.flush_trace(trace_id)
 
     async def _process_event(self, event: InboundEvent, trace_id: str) -> str | None:
-        session = self.sessions.get_or_create(event.session_key)
+        session = await self.sessions.get_or_create(event.session_key)
 
         if self._snapshot_enabled:
             if event.session_key not in self._memory_snapshots:
@@ -200,8 +200,7 @@ class AgentLoop:
             if result.was_compressed:
                 logger.info("Context compressed: {} → {} tokens", result.tokens_before, result.tokens_after)
                 session.messages = session.messages[:session.last_consolidated] + result.messages
-                self.sessions.save(session)
-
+                await self.sessions.save(session)
         session.add_message("user", event.text)
 
         retrieval = ""
@@ -369,8 +368,7 @@ class AgentLoop:
             chunk = session.messages[session.last_consolidated:]
             if await self.consolidator.consolidate_chunk(chunk):
                 session.last_consolidated = len(session.messages)
-                self.sessions.save(session)
-        except Exception as e:
+                await self.sessions.save(session)        except Exception as e:
             logger.error("Consolidation failed for {}: {}", session.key, e)
 
     async def process_direct(self, content: str, session_key: str = "cli:direct") -> str:

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import shutil
 from dataclasses import dataclass, field
@@ -77,7 +76,7 @@ class SessionManager:
         safe = key.replace(":", "_").replace("/", "_")
         return self.sessions_dir / f"{safe}.jsonl"
 
-    def get_or_create(self, key: str) -> Session:
+    async def get_or_create(self, key: str) -> Session:
         if key in self._cache:
             session = self._cache[key]
             if session.status == "expired":
@@ -85,20 +84,20 @@ class SessionManager:
                 session.updated_at = datetime.now()
             return session
 
-        session = self._load(key)
+        session = await self._load(key)
         if session is None:
             session = Session(key=key)
         self._cache[key] = session
         return session
 
-    def _load(self, key: str) -> Session | None:
+    async def _load(self, key: str) -> Session | None:
         if self._storage:
-            return self._load_from_storage(key)
+            return await self._load_from_storage(key)
         return self._load_from_file(key)
 
-    def _load_from_storage(self, key: str) -> Session | None:
+    async def _load_from_storage(self, key: str) -> Session | None:
         try:
-            data = asyncio.get_event_loop().run_until_complete(self._storage.load_session(key))
+            data = await self._storage.load_session(key)
             if not data:
                 return None
             return Session(
@@ -154,14 +153,14 @@ class SessionManager:
             logger.warning("Failed to load session {}: {}", key, e)
             return None
 
-    def save(self, session: Session) -> None:
+    async def save(self, session: Session) -> None:
         self._cache[session.key] = session
         if self._storage:
-            self._save_to_storage(session)
+            await self._save_to_storage(session)
         else:
             self._save_to_file(session)
 
-    def _save_to_storage(self, session: Session) -> None:
+    async def _save_to_storage(self, session: Session) -> None:
         data = {
             "messages": session.messages,
             "created_at": session.created_at.isoformat(),
@@ -171,9 +170,7 @@ class SessionManager:
             "status": session.status,
         }
         try:
-            asyncio.get_event_loop().run_until_complete(
-                self._storage.store_session(session.key, data)
-            )
+            await self._storage.store_session(session.key, data)
         except Exception as e:
             logger.warning("Failed to save session {} to storage, falling back to file: {}", session.key, e)
             self._save_to_file(session)
@@ -194,11 +191,11 @@ class SessionManager:
             for msg in session.messages:
                 f.write(json.dumps(msg, ensure_ascii=False) + "\n")
 
-    def expire_session(self, key: str) -> None:
+    async def expire_session(self, key: str) -> None:
         session = self._cache.get(key)
         if session:
             session.status = "expired"
-            self.save(session)
+            await self.save(session)
 
     def archive_session(self, key: str) -> bool:
         path = self._session_path(key)
@@ -210,20 +207,20 @@ class SessionManager:
         self._cache.pop(key, None)
         return True
 
-    def reopen_session(self, key: str) -> Session | None:
+    async def reopen_session(self, key: str) -> Session | None:
         archive_path = self.sessions_dir / "archive" / self._session_path(key).name
         if archive_path.exists():
             target = self._session_path(key)
             shutil.move(str(archive_path), str(target))
-        session = self._load(key)
+        session = await self._load(key)
         if session:
             session.status = "active"
             session.updated_at = datetime.now()
             self._cache[key] = session
-            self.save(session)
+            await self.save(session)
         return session
 
-    def cleanup_expired(self) -> int:
+    async def cleanup_expired(self) -> int:
         """Expire stale sessions and archive old expired ones. Returns count processed."""
         now = datetime.now()
         count = 0
@@ -241,7 +238,7 @@ class SessionManager:
                 key = data.get("key", path.stem.replace("_", ":", 1))
 
                 if status == "active" and (now - updated) > self._expiry_delta:
-                    self.expire_session(key)
+                    await self.expire_session(key)
                     count += 1
                 elif status == "expired" and (now - updated) > self._archive_delta:
                     self.archive_session(key)

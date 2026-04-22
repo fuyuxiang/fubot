@@ -41,13 +41,13 @@ class SessionSearchTool(Tool):
         results: list[str] = []
 
         if session_key:
-            session = self._sessions.get_or_create(session_key)
+            session = await self._sessions.get_or_create(session_key)
             self._search_session(session, pattern, role_filter, results, max_results)
         else:
             for key in self._sessions.list_sessions():
                 if len(results) >= max_results:
                     break
-                session = self._sessions.get_or_create(key)
+                session = await self._sessions.get_or_create(key)
                 self._search_session(session, pattern, role_filter, results, max_results)
 
         if not results:

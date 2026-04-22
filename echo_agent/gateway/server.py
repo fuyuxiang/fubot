@@ -198,10 +198,10 @@ class GatewayServer:
             return web.json_response({"error": "rate limited"}, status=429)
 
         session_key = f"gateway:{platform}:{chat_id}"
-        session = self.session_manager.get_or_create(session_key)
+        session = await self.session_manager.get_or_create(session_key)
 
         if self.session_policy.should_reset(session):
-            self.session_policy.reset(session, self.session_manager)
+            await self.session_policy.reset(session, self.session_manager)
             await self.hooks.emit("session_reset", session_key=session_key)
 
         tokens = set_session_vars(
@@ -290,8 +290,8 @@ class GatewayServer:
 
     async def _handle_reset_session(self, request: web.Request) -> web.Response:
         key = request.match_info["key"]
-        session = self.session_manager.get_or_create(key)
-        self.session_policy.reset(session, self.session_manager)
+        session = await self.session_manager.get_or_create(key)
+        await self.session_policy.reset(session, self.session_manager)
         await self.hooks.emit("session_reset", session_key=key)
         return web.json_response({"status": "reset", "session_key": key})
 
@@ -370,9 +370,9 @@ class GatewayServer:
                         ws_id = session_key
                         self._ws_clients[ws_id] = ws
 
-                        session = self.session_manager.get_or_create(session_key)
+                        session = await self.session_manager.get_or_create(session_key)
                         if self.session_policy.should_reset(session):
-                            self.session_policy.reset(session, self.session_manager)
+                            await self.session_policy.reset(session, self.session_manager)
 
                         await ws.send_json({"type": "auth_ok", "session_key": session_key})
                         await self.hooks.emit(

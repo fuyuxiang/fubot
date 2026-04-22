@@ -116,7 +116,7 @@ async def _bootstrap(
     health.register_check("storage", _check_storage)
 
     async def _session_cleanup() -> CH:
-        count = agent.sessions.cleanup_expired()
+        count = await agent.sessions.cleanup_expired()
         if count:
             logger.info("Cleaned up {} expired sessions", count)
         return CH.HEALTHY

@@ -146,6 +146,10 @@ class QQBotChannel(BaseChannel):
                     if resp.status < 400:
                         return
                     body = await resp.text()
+                    if resp.status == 400 and "40034024" in body and "msg_id" in payload:
+                        logger.info("QQBot msg_id expired, retrying without reply reference")
+                        payload.pop("msg_id", None)
+                        continue
                     if resp.status in (400, 401, 403, 404):
                         logger.warning("QQBot send permanent error ({}): {}", resp.status, body[:200])
                         return

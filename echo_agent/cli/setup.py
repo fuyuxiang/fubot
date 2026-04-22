@@ -53,7 +53,7 @@ CHANNEL_DEFS: list[tuple[str, str, list[tuple[str, str]]]] = [
     ("feishu", "Feishu / Lark", [("app_id", "App ID"), ("app_secret", "App secret")]),
     ("wecom", "WeCom", [("corp_id", "Corp ID"), ("agent_id", "Agent ID"), ("secret", "Secret")]),
     ("wechat", "WeChat Official Account", [("app_id", "App ID"), ("app_secret", "App secret")]),
-    ("weixin", "WeChat Personal (iLink)", [("account_id", "Account ID"), ("token", "Bearer token")]),
+    ("weixin", "WeChat Personal (iLink)", []),
     ("qqbot", "QQ Bot", [("app_id", "App ID"), ("app_secret", "App secret")]),
     ("email", "Email", [("imap_host", "IMAP host"), ("smtp_host", "SMTP host"), ("username", "Username"), ("password", "Password")]),
     ("matrix", "Matrix", [("homeserver", "Homeserver URL"), ("user_id", "User ID"), ("access_token", "Access token")]),
@@ -113,6 +113,28 @@ def setup_model(config: dict) -> None:
     print_success(f"Provider: {provider_label}, Model: {default_model}")
 
 
+def _setup_weixin_qr(ch: dict) -> None:
+    """Run iLink QR code login flow for WeChat Personal."""
+    import asyncio
+
+    print_info("Starting WeChat QR code login...")
+    print_info("A QR code URL will appear below. Open it in a browser and scan with WeChat.")
+    print()
+
+    from echo_agent.channels.weixin import WeixinChannel
+
+    result = asyncio.run(WeixinChannel.qr_login())
+    if result:
+        ch["account_id"] = result["account_id"]
+        ch["token"] = result["token"]
+        if result.get("base_url"):
+            ch["base_url"] = result["base_url"]
+        print_success("WeChat login successful!")
+    else:
+        print_error("WeChat QR login failed or timed out.")
+        print_info("You can retry later with 'echo-agent setup channel'.")
+
+
 def setup_channels(config: dict) -> None:
     print_header("Messaging Channels")
     print_info("Select channels to configure. CLI is always enabled.")
@@ -132,6 +154,11 @@ def setup_channels(config: dict) -> None:
         print_header(f"{ch_label} Configuration")
         ch = channels_cfg.setdefault(ch_key, {})
         ch["enabled"] = True
+
+        if ch_key == "weixin":
+            _setup_weixin_qr(ch)
+            continue
+
         for field_key, field_label in fields:
             is_secret = "key" in field_key.lower() or "secret" in field_key.lower() or "token" in field_key.lower() or "password" in field_key.lower()
             value = prompt(f"  {field_label}", default=ch.get(field_key, ""), password=is_secret)

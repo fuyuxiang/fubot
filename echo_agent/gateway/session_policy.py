@@ -31,11 +31,11 @@ class SessionResetPolicy:
 
         return False
 
-    def reset(self, session: Session, manager: SessionManager) -> None:
+    async def reset(self, session: Session, manager: SessionManager) -> None:
         session.clear()
         session.metadata["last_reset_at"] = datetime.now().isoformat()
         session.metadata["reset_count"] = session.metadata.get("reset_count", 0) + 1
-        manager.save(session)
+        await manager.save(session)
 
     def _crossed_daily_boundary(self, last_active: datetime, now: datetime) -> bool:
         reset_today = now.replace(
