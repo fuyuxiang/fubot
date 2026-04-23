@@ -87,6 +87,14 @@ def _headers(token: str | None, body: str) -> dict[str, str]:
     return h
 
 
+def _login_headers() -> dict[str, str]:
+    return {
+        "X-WECHAT-UIN": _random_uin(),
+        "iLink-App-Id": _APP_ID,
+        "iLink-App-ClientVersion": str(_APP_CLIENT_VERSION),
+    }
+
+
 def _pkcs7_pad(data: bytes, block_size: int = 16) -> bytes:
     pad_len = block_size - (len(data) % block_size)
     return data + bytes([pad_len] * pad_len)
@@ -501,23 +509,23 @@ class WeixinChannel(BaseChannel):
         base_url: str = "https://ilinkai.weixin.qq.com",
         timeout_seconds: int = 480,
     ) -> dict[str, str] | None:
+        base_url = base_url.rstrip("/")
         async with aiohttp.ClientSession(trust_env=True) as session:
-            body = _json_dumps({"base_info": {"channel_version": _CHANNEL_VERSION}, "bot_type": 3})
             url = f"{base_url}/{_EP_GET_BOT_QR}"
-            async with session.post(url, data=body.encode(), headers=_headers(None, body)) as resp:
+            async with session.get(url, params={"bot_type": "3"}, headers=_login_headers()) as resp:
                 if resp.status != 200:
-                    logger.error("weixin: get_bot_qrcode HTTP %s: %s", resp.status, await resp.text())
+                    logger.error("weixin: get_bot_qrcode HTTP {}: {}", resp.status, await resp.text())
                     return None
                 data = await resp.json(content_type=None)
 
             errcode = data.get("errcode") or data.get("err_code")
             if errcode:
-                logger.error("weixin: get_bot_qrcode returned error %s: %s", errcode, data.get("errmsg") or data.get("err_msg") or data)
+                logger.error("weixin: get_bot_qrcode returned error {}: {}", errcode, data.get("errmsg") or data.get("err_msg") or data)
 
             qrcode = data.get("qrcode")
             qr_url = data.get("qrcode_img_content")
             if not qrcode:
-                logger.error("weixin: failed to get QR code, response: %s", data)
+                logger.error("weixin: failed to get QR code, response: {}", data)
                 return None
 
             print(f"\nScan this QR code with WeChat:\n{qr_url}\n")
@@ -526,26 +534,24 @@ class WeixinChannel(BaseChannel):
             refresh_count = 0
             while time.time() < deadline:
                 await asyncio.sleep(2)
-                check_body = _json_dumps({"base_info": {"channel_version": _CHANNEL_VERSION}, "qrcode": qrcode})
                 check_url = f"{base_url}/{_EP_GET_QR_STATUS}"
-                async with session.post(check_url, data=check_body.encode(), headers=_headers(None, check_body)) as resp:
+                async with session.get(check_url, params={"qrcode": qrcode}, headers=_login_headers()) as resp:
                     status_data = await resp.json(content_type=None)
 
                 status = status_data.get("status", "")
                 if status == "confirmed":
                     return {
-                        "account_id": str(status_data.get("account_id") or ""),
-                        "token": str(status_data.get("token") or ""),
-                        "base_url": str(status_data.get("base_url") or base_url),
-                        "user_id": str(status_data.get("user_id") or ""),
+                        "account_id": str(status_data.get("account_id") or status_data.get("ilink_bot_id") or ""),
+                        "token": str(status_data.get("token") or status_data.get("bot_token") or ""),
+                        "base_url": str(status_data.get("base_url") or status_data.get("baseurl") or base_url),
+                        "user_id": str(status_data.get("user_id") or status_data.get("ilink_user_id") or ""),
                     }
                 elif status == "expired":
                     refresh_count += 1
                     if refresh_count >= 3:
                         logger.error("weixin: QR code expired too many times")
                         return None
-                    body = _json_dumps({"base_info": {"channel_version": _CHANNEL_VERSION}, "bot_type": 3})
-                    async with session.post(url, data=body.encode(), headers=_headers(None, body)) as resp:
+                    async with session.get(url, params={"bot_type": "3"}, headers=_login_headers()) as resp:
                         data = await resp.json(content_type=None)
                     qrcode = data.get("qrcode")
                     qr_url = data.get("qrcode_img_content")

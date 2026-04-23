@@ -24,6 +24,15 @@ def _find_config_file(search_dir: Path | None = None) -> Path | None:
     return None
 
 
+def resolve_config_file(config_path: str | Path | None = None, search_dir: str | Path | None = None) -> Path | None:
+    if config_path:
+        path = Path(config_path).expanduser()
+        return path.resolve() if path.exists() else path
+    base = Path(search_dir).expanduser() if search_dir else None
+    found = _find_config_file(base)
+    return found.resolve() if found else None
+
+
 def _load_yaml_file(path: Path | None) -> dict[str, Any]:
     if not path or not path.exists():
         return {}
@@ -62,7 +71,7 @@ def load_config(
 ) -> Config:
     data: dict[str, Any] = _load_yaml_file(_PACKAGED_DEFAULT_CONFIG)
 
-    path = Path(config_path) if config_path else _find_config_file()
+    path = resolve_config_file(config_path)
     if path and path.exists():
         logger.info("Loading config from {}", path)
         data = _deep_merge(data, _load_yaml_file(path))
@@ -83,6 +92,7 @@ def save_config(data: dict[str, Any], path: str | Path | None = None) -> Path:
     Returns the path written to.
     """
     target = Path(path) if path else Path.cwd() / "echo-agent.yaml"
+    target.parent.mkdir(parents=True, exist_ok=True)
     with open(target, "w", encoding="utf-8") as f:
         yaml.dump(data, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
     return target

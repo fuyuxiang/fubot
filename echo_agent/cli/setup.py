@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 from echo_agent.cli.colors import (
@@ -266,19 +265,34 @@ def _print_summary(config: dict, config_path: Path) -> None:
 
 # ── Main entry points ───────────────────────────────────────────────────────
 
-def run_setup_wizard(section: str | None = None) -> None:
+def _setup_config_target(config_path: str | Path | None = None, workspace: str | Path | None = None) -> Path | None:
+    if config_path:
+        return Path(config_path).expanduser()
+    if workspace:
+        ws = Path(workspace).expanduser()
+        return _find_config_file(ws) or ws / "echo-agent.yaml"
+    return _find_config_file()
+
+
+def run_setup_wizard(
+    section: str | None = None,
+    config_path: str | Path | None = None,
+    workspace: str | Path | None = None,
+) -> None:
     if not is_interactive():
         print_error("Setup wizard requires an interactive terminal.")
         print_info("Configure manually by creating echo-agent.yaml")
         return
 
     # Load existing config if present
-    existing_file = _find_config_file()
+    existing_file = _setup_config_target(config_path=config_path, workspace=workspace)
     config: dict = {}
-    if existing_file:
+    if existing_file and existing_file.exists():
         import yaml
         with open(existing_file, encoding="utf-8") as f:
             config = yaml.safe_load(f) or {}
+    if workspace and "workspace" not in config:
+        config["workspace"] = "."
 
     # Section-specific setup
     if section:
@@ -335,7 +349,7 @@ def run_setup_wizard(section: str | None = None) -> None:
             print()
             if prompt_yes_no("Configure messaging channels?", default=False):
                 setup_channels(config)
-            path = save_config(config)
+            path = save_config(config, existing_file)
             print()
             _print_summary(config, path)
             print_success("Setup complete! Run 'echo-agent' to start.")
@@ -351,9 +365,11 @@ def run_setup_wizard(section: str | None = None) -> None:
     print_success("Setup complete! Run 'echo-agent' to start.")
 
 
-def has_any_provider_configured() -> bool:
-    config_file = _find_config_file()
+def has_any_provider_configured(config_path: str | Path | None = None, workspace: str | Path | None = None) -> bool:
+    config_file = _setup_config_target(config_path=config_path, workspace=workspace)
     if not config_file:
+        return False
+    if not config_file.exists():
         return False
     import yaml
     with open(config_file, encoding="utf-8") as f:
@@ -362,17 +378,18 @@ def has_any_provider_configured() -> bool:
     return bool(providers)
 
 
-def prompt_first_run_setup() -> bool:
+def prompt_first_run_setup(config_path: str | Path | None = None, workspace: str | Path | None = None) -> bool:
     if not is_interactive():
         return False
-    if has_any_provider_configured():
+    if has_any_provider_configured(config_path=config_path, workspace=workspace):
         return False
-    if _find_config_file():
+    config_file = _setup_config_target(config_path=config_path, workspace=workspace)
+    if config_file and config_file.exists():
         return False
     print()
     print_warning("No configuration found — Echo Agent is not set up yet.")
     if prompt_yes_no("Run setup wizard now?", default=True):
-        run_setup_wizard()
+        run_setup_wizard(config_path=config_path, workspace=workspace)
         return True
     print_info("Skipping setup. Using default configuration (stub provider).")
     print_info("Run 'echo-agent setup' later to configure.")

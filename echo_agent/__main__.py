@@ -41,17 +41,22 @@ async def _bootstrap(
     from echo_agent.agent.loop import AgentLoop
     from echo_agent.bus.queue import MessageBus
     from echo_agent.channels.manager import ChannelManager
-    from echo_agent.config.loader import load_config
+    from echo_agent.config.loader import load_config, resolve_config_file
     from echo_agent.models.provider import LLMProvider, LLMResponse
     from echo_agent.models.providers import create_provider
     from echo_agent.models.router import ModelRouter
     from echo_agent.observability.monitor import HealthChecker
     from echo_agent.storage.sqlite import SQLiteBackend
 
-    config = load_config(config_path=config_path, overrides=overrides)
+    config_file = resolve_config_file(config_path)
+    config = load_config(config_path=config_file, overrides=overrides)
     _configure_logging(config.observability.log_level)
 
-    ws = Path(config.workspace).expanduser().resolve()
+    workspace_value = Path(config.workspace).expanduser()
+    if not workspace_value.is_absolute():
+        workspace_base = Path.cwd() if overrides and "workspace" in overrides else (config_file.parent if config_file else Path.cwd())
+        workspace_value = workspace_base / workspace_value
+    ws = workspace_value.resolve()
     ws.mkdir(parents=True, exist_ok=True)
 
     storage = SQLiteBackend(ws / config.storage.database_path)
@@ -60,6 +65,7 @@ async def _bootstrap(
     bus = MessageBus()
     router = ModelRouter(config.models)
     provider: LLMProvider | None = None
+    provider_errors: list[str] = []
 
     for pc in config.models.providers:
         try:
@@ -69,16 +75,27 @@ async def _bootstrap(
                 provider = p
             logger.info("Registered provider: {}", pc.name)
         except Exception as e:
+            provider_errors.append(f"{pc.name or '<unnamed>'}: {e}")
             logger.warning("Failed to create provider '{}': {}", pc.name, e)
 
     if provider is None:
+        if config.models.providers:
+            details = "; ".join(provider_errors) or "all configured providers were skipped"
+            stub_message = (
+                "[No LLM provider could be initialized. Check provider SDK/API key. "
+                f"Details: {details}]"
+            )
+            logger.warning("No providers initialized — using stub: {}", details)
+        else:
+            stub_message = "[No LLM provider configured. Set up a provider in echo-agent.yaml]"
+            logger.warning("No providers configured — using stub")
+
         class _StubProvider(LLMProvider):
             async def chat(self, messages, tools=None, model=None, tool_choice=None, **kw):
-                return LLMResponse(content="[No LLM provider configured. Set up a provider in echo-agent.yaml]")
+                return LLMResponse(content=stub_message)
             def get_default_model(self):
                 return "stub"
         provider = _StubProvider()
-        logger.warning("No providers configured — using stub")
 
     from echo_agent.scheduler.service import Scheduler
     scheduler: Scheduler | None = None
@@ -141,6 +158,9 @@ def _install_signal_handler(shutdown: asyncio.Event) -> None:
 
 
 async def _run(config_path: str | None = None, workspace: str | None = None) -> None:
+    if config_path is None and workspace:
+        from echo_agent.config.loader import resolve_config_file
+        config_path = str(resolve_config_file(search_dir=workspace) or "")
     overrides = {"workspace": workspace} if workspace else None
     shutdown = asyncio.Event()
     ctx = await _bootstrap(config_path=config_path, overrides=overrides, on_cli_exit=shutdown.set)
@@ -195,8 +215,11 @@ async def _run(config_path: str | None = None, workspace: str | None = None) -> 
     logger.info("Echo Agent stopped")
 
 
-async def _run_gateway(config_path: str | None = None, host: str | None = None, port: int | None = None) -> None:
-    overrides: dict[str, Any] = {}
+async def _run_gateway(config_path: str | None = None, host: str | None = None, port: int | None = None, workspace: str | None = None) -> None:
+    if config_path is None and workspace:
+        from echo_agent.config.loader import resolve_config_file
+        config_path = str(resolve_config_file(search_dir=workspace) or "")
+    overrides: dict[str, Any] = {"workspace": workspace} if workspace else {}
     shutdown = asyncio.Event()
     ctx = await _bootstrap(config_path=config_path, overrides=overrides or None, on_cli_exit=shutdown.set)
     ctx.config.gateway.enabled = True
@@ -243,13 +266,18 @@ def main() -> None:
     # setup
     setup_parser = subparsers.add_parser("setup", help="Run the setup wizard")
     setup_parser.add_argument("section", nargs="?", default=None, help="Setup section: model, channel, advanced")
+    setup_parser.add_argument("-c", "--config", help="Path to config file")
+    setup_parser.add_argument("-w", "--workspace", help="Workspace directory")
 
     # status
-    subparsers.add_parser("status", help="Show current configuration status")
+    status_parser = subparsers.add_parser("status", help="Show current configuration status")
+    status_parser.add_argument("-c", "--config", help="Path to config file")
+    status_parser.add_argument("-w", "--workspace", help="Workspace directory")
 
     # gateway
     gw_parser = subparsers.add_parser("gateway", help="Start the gateway server")
     gw_parser.add_argument("-c", "--config", help="Path to config file")
+    gw_parser.add_argument("-w", "--workspace", help="Workspace directory")
     gw_parser.add_argument("--host", help="Gateway host")
     gw_parser.add_argument("--port", type=int, help="Gateway port")
 
@@ -261,17 +289,17 @@ def main() -> None:
 
     if args.command == "setup":
         from echo_agent.cli.setup import run_setup_wizard
-        run_setup_wizard(section=args.section)
+        run_setup_wizard(section=args.section, config_path=args.config or args.top_config, workspace=args.workspace or args.top_workspace)
         return
 
     if args.command == "status":
         from echo_agent.cli.status import show_status
-        show_status()
+        show_status(config_path=args.config or args.top_config, workspace=args.workspace or args.top_workspace)
         return
 
     if args.command == "gateway":
         try:
-            asyncio.run(_run_gateway(config_path=args.config, host=args.host, port=args.port))
+            asyncio.run(_run_gateway(config_path=args.config or args.top_config, host=args.host, port=args.port, workspace=args.workspace or args.top_workspace))
         except KeyboardInterrupt:
             pass
         return
@@ -281,7 +309,7 @@ def main() -> None:
     workspace = getattr(args, "workspace", None) or args.top_workspace
 
     from echo_agent.cli.setup import prompt_first_run_setup
-    if prompt_first_run_setup():
+    if prompt_first_run_setup(config_path=config_path, workspace=workspace):
         return
 
     try:

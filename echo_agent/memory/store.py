@@ -5,7 +5,7 @@ Two-layer design:
   - Environment memory: project background, tool docs, process rules, domain knowledge
 
 The implementation keeps the structured memory model used by Echo Agent, while
-adopting Hermes-style safety properties:
+using built-in safety properties:
   - per-target file locking to avoid stale concurrent writes
   - atomic file replacement for durable persistence
   - prompt-injection / exfiltration scanning before memory is accepted

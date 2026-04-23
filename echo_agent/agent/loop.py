@@ -321,7 +321,7 @@ class AgentLoop:
             response_text = strip_thinking(response_text)
 
         session.add_message("assistant", response_text)
-        self.sessions.save(session)
+        await self.sessions.save(session)
 
         if self.consolidator.should_consolidate(session.message_count, session.last_consolidated):
             asyncio.create_task(self._consolidate(session))
