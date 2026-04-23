@@ -25,7 +25,9 @@ from echo_agent.memory.store import MemoryStore
 from echo_agent.models.inference import InferenceController
 from echo_agent.models.provider import LLMProvider
 from echo_agent.observability.monitor import TraceLogger
-from echo_agent.permissions.manager import ApprovalManager, CredentialManager, PermissionManager
+from echo_agent.permissions.manager import (
+    ApprovalManager, CredentialManager, Effect, PermissionLevel, PermissionManager, PermissionRule,
+)
 from echo_agent.session.manager import Session, SessionManager
 from echo_agent.skills.store import SkillStore
 from echo_agent.utils.text import strip_thinking
@@ -73,6 +75,14 @@ class AgentLoop:
             default_model=config.models.default_model,
         )
         self.permissions = PermissionManager(admin_users=config.permissions.admin_users)
+        for rule_cfg in config.permissions.rules:
+            self.permissions.add_rule(PermissionRule(
+                level=PermissionLevel(rule_cfg.scope) if rule_cfg.scope != "*" else PermissionLevel.TOOL,
+                subject=rule_cfg.action,
+                action=rule_cfg.action,
+                effect=Effect(rule_cfg.effect),
+                scope=rule_cfg.scope,
+            ))
         self.approval = ApprovalManager(
             require_approval=config.permissions.approval.require_approval,
             auto_approve=config.permissions.approval.auto_approve,

@@ -86,7 +86,7 @@ class PermissionManager:
         for rule in self._rules:
             if rule.matches(level, subject, action):
                 return rule.effect
-        return Effect.DENY
+        return Effect.ALLOW if not self._rules else Effect.DENY
 
     def check_tool(self, tool_name: str, user_id: str = "") -> bool:
         return self.check(PermissionLevel.TOOL, tool_name, "execute", user_id) == Effect.ALLOW
