@@ -12,6 +12,7 @@ from loguru import logger
 from echo_agent.config.schema import Config
 
 _DEFAULT_CONFIG_NAMES = ("echo-agent.yaml", "echo-agent.yml", "config.yaml", "config.yml")
+_PACKAGED_DEFAULT_CONFIG = Path(__file__).with_name("default.yaml")
 
 
 def _find_config_file(search_dir: Path | None = None) -> Path | None:
@@ -21,6 +22,13 @@ def _find_config_file(search_dir: Path | None = None) -> Path | None:
         if candidate.exists():
             return candidate
     return None
+
+
+def _load_yaml_file(path: Path | None) -> dict[str, Any]:
+    if not path or not path.exists():
+        return {}
+    with open(path, encoding="utf-8") as f:
+        return yaml.safe_load(f) or {}
 
 
 def _deep_merge(base: dict, override: dict) -> dict:
@@ -52,13 +60,12 @@ def load_config(
     config_path: str | Path | None = None,
     overrides: dict[str, Any] | None = None,
 ) -> Config:
-    data: dict[str, Any] = {}
+    data: dict[str, Any] = _load_yaml_file(_PACKAGED_DEFAULT_CONFIG)
 
     path = Path(config_path) if config_path else _find_config_file()
     if path and path.exists():
         logger.info("Loading config from {}", path)
-        with open(path, encoding="utf-8") as f:
-            data = yaml.safe_load(f) or {}
+        data = _deep_merge(data, _load_yaml_file(path))
 
     env = _env_overrides()
     if env:

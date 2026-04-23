@@ -8,7 +8,7 @@ import signal
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from loguru import logger
 
@@ -35,6 +35,7 @@ class _BootstrapResult:
 async def _bootstrap(
     config_path: str | None = None,
     overrides: dict[str, Any] | None = None,
+    on_cli_exit: Callable[[], None] | None = None,
 ) -> _BootstrapResult:
     """Shared bootstrap: config → storage → providers → bus → agent → channels."""
     from echo_agent.agent.loop import AgentLoop
@@ -48,10 +49,10 @@ async def _bootstrap(
     from echo_agent.storage.sqlite import SQLiteBackend
 
     config = load_config(config_path=config_path, overrides=overrides)
+    _configure_logging(config.observability.log_level)
+
     ws = Path(config.workspace).expanduser().resolve()
     ws.mkdir(parents=True, exist_ok=True)
-
-    _configure_logging(config.observability.log_level)
 
     storage = SQLiteBackend(ws / config.storage.database_path)
     await storage.initialize()
@@ -97,7 +98,7 @@ async def _bootstrap(
         scheduler=scheduler, storage=storage,
         task_manager=task_manager, workflow_engine=workflow_engine,
     )
-    channels = ChannelManager(config.channels, bus)
+    channels = ChannelManager(config.channels, bus, on_cli_exit=on_cli_exit)
     health = HealthChecker(check_interval=config.observability.health_check_interval_seconds)
 
     from echo_agent.observability.monitor import ComponentHealth as CH
@@ -141,16 +142,26 @@ def _install_signal_handler(shutdown: asyncio.Event) -> None:
 
 async def _run(config_path: str | None = None, workspace: str | None = None) -> None:
     overrides = {"workspace": workspace} if workspace else None
-    ctx = await _bootstrap(config_path=config_path, overrides=overrides)
+    shutdown = asyncio.Event()
+    ctx = await _bootstrap(config_path=config_path, overrides=overrides, on_cli_exit=shutdown.set)
 
     logger.info("Echo Agent starting — workspace: {}", ctx.workspace)
 
-    shutdown = asyncio.Event()
     _install_signal_handler(shutdown)
 
     await ctx.bus.start()
     await ctx.agent.start()
     await ctx.channels.start_all()
+    if not ctx.channels.active_channels and not ctx.config.gateway.enabled:
+        logger.error(
+            "No active input channels. Run in an interactive terminal, enable gateway, "
+            "or configure another channel."
+        )
+        await ctx.channels.stop_all()
+        await ctx.agent.stop()
+        await ctx.bus.stop()
+        await ctx.storage.close()
+        return
     if ctx.scheduler:
         await ctx.scheduler.start()
     await ctx.health.start()
@@ -186,14 +197,14 @@ async def _run(config_path: str | None = None, workspace: str | None = None) -> 
 
 async def _run_gateway(config_path: str | None = None, host: str | None = None, port: int | None = None) -> None:
     overrides: dict[str, Any] = {}
-    ctx = await _bootstrap(config_path=config_path, overrides=overrides or None)
+    shutdown = asyncio.Event()
+    ctx = await _bootstrap(config_path=config_path, overrides=overrides or None, on_cli_exit=shutdown.set)
     ctx.config.gateway.enabled = True
     if host:
         ctx.config.gateway.host = host
     if port:
         ctx.config.gateway.port = port
 
-    shutdown = asyncio.Event()
     _install_signal_handler(shutdown)
 
     await ctx.bus.start()

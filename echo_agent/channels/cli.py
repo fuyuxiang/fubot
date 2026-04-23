@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+from collections.abc import Callable
 
 from loguru import logger
 
@@ -16,11 +17,16 @@ from echo_agent.config.schema import CLIChannelConfig
 class CLIChannel(BaseChannel):
     name = "cli"
 
-    def __init__(self, config: CLIChannelConfig, bus: MessageBus):
+    def __init__(self, config: CLIChannelConfig, bus: MessageBus, on_exit: Callable[[], None] | None = None):
         super().__init__(config, bus)
         self._task: asyncio.Task | None = None
+        self._on_exit = on_exit
 
     async def start(self) -> None:
+        if not sys.stdin.isatty():
+            self._running = False
+            logger.warning("CLI channel disabled because stdin is not interactive")
+            return
         self._running = True
         self.bus.subscribe_outbound(self.name, self.send)
         self._task = asyncio.create_task(self._read_loop())
@@ -46,12 +52,15 @@ class CLIChannel(BaseChannel):
             try:
                 line = await loop.run_in_executor(None, self._read_line)
                 if line is None:
+                    self._running = False
+                    self._request_exit()
                     break
                 line = line.strip()
                 if not line:
                     continue
                 if line.lower() in ("exit", "quit", "/quit"):
                     self._running = False
+                    self._request_exit()
                     break
                 await self._handle_message(
                     sender_id="cli_user",
@@ -63,6 +72,10 @@ class CLIChannel(BaseChannel):
                 break
             except Exception as e:
                 logger.error("CLI read error: {}", e)
+
+    def _request_exit(self) -> None:
+        if self._on_exit:
+            self._on_exit()
 
     @staticmethod
     def _read_line() -> str | None:

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from collections.abc import Callable
 
 from loguru import logger
 
@@ -52,12 +52,13 @@ def register_channel_type(name: str, cls: type[BaseChannel]) -> None:
 class ChannelManager:
     """Manages the lifecycle of all enabled channel adapters."""
 
-    def __init__(self, config: ChannelsConfig, bus: MessageBus):
+    def __init__(self, config: ChannelsConfig, bus: MessageBus, on_cli_exit: Callable[[], None] | None = None):
         self.config = config
         self.bus = bus
         self._channels: dict[str, BaseChannel] = {}
         self._send_progress = config.send_progress
         self._send_tool_hints = config.send_tool_hints
+        self._on_cli_exit = on_cli_exit
         self.bus.subscribe_outbound_global(self._filter_and_dispatch)
 
     def get_channel(self, name: str) -> BaseChannel | None:
@@ -85,12 +86,18 @@ class ChannelManager:
             if not getattr(channel_config, "enabled", False):
                 continue
             try:
-                channel = cls(channel_config, self.bus)
+                if cls is CLIChannel:
+                    channel = cls(channel_config, self.bus, on_exit=self._on_cli_exit)
+                else:
+                    channel = cls(channel_config, self.bus)
                 if self.config.transcription_api_key:
                     channel.transcription_api_key = self.config.transcription_api_key
                 await channel.start()
                 self._channels[name] = channel
-                logger.info("Channel {} started", name)
+                if channel.is_running:
+                    logger.info("Channel {} started", name)
+                else:
+                    logger.info("Channel {} inactive", name)
             except Exception as e:
                 logger.error("Failed to start channel {}: {}", name, e)
 

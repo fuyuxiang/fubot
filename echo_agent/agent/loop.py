@@ -7,10 +7,9 @@ Integrates all subsystems: session, memory, tools, permissions, observability.
 from __future__ import annotations
 
 import asyncio
-import json
 import uuid
 from pathlib import Path
-from typing import Any, Awaitable, Callable
+from typing import Any
 
 from loguru import logger
 
@@ -24,7 +23,7 @@ from echo_agent.config.schema import Config
 from echo_agent.memory.consolidator import MemoryConsolidator
 from echo_agent.memory.store import MemoryStore
 from echo_agent.models.inference import InferenceController
-from echo_agent.models.provider import LLMProvider, LLMResponse
+from echo_agent.models.provider import LLMProvider
 from echo_agent.observability.monitor import TraceLogger
 from echo_agent.permissions.manager import ApprovalManager, CredentialManager, PermissionManager
 from echo_agent.session.manager import Session, SessionManager
@@ -99,7 +98,7 @@ class AgentLoop:
 
         skills_dir = workspace / config.skills.skills_dir
         self.skill_store = SkillStore(
-            user_dir=Path.home() / ".echo-agent" / "skills",
+            user_dir=workspace / "data" / "skills",
             builtin_dir=skills_dir if skills_dir.exists() else None,
             external_dirs=[Path(d) for d in config.skills.external_dirs],
             disabled=config.skills.disabled,
