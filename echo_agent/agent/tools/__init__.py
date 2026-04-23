@@ -33,7 +33,12 @@ def discover_tools(
     restrict = config.tools.restrict_to_workspace
     tools: list[Tool] = []
 
-    tools.append(ShellTool(ws, max_output=config.tools.exec.max_output_chars))
+    tools.append(ShellTool(
+        ws,
+        allowed=config.tools.exec.allowed_commands,
+        blocked=config.tools.exec.blocked_commands,
+        max_output=config.tools.exec.max_output_chars,
+    ))
     tools.append(ReadFileTool(ws, restrict))
     tools.append(WriteFileTool(ws, restrict))
     tools.append(EditFileTool(ws, restrict))

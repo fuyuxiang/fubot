@@ -185,7 +185,7 @@ class GatewayServer:
         text = body.get("text", "")
         media_urls = body.get("media_urls", [])
         wait = bool(body.get("wait", False))
-        timeout_seconds = max(1, min(int(body.get("timeout_seconds", 120)), 300))
+        timeout_seconds = max(1, min(int(body.get("timeout_seconds", 180)), 600))
 
         if not text and not media_urls:
             return web.json_response({"error": "text or media_urls required"}, status=400)

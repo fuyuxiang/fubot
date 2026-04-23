@@ -26,7 +26,7 @@ class SearchFilesTool(Tool):
     timeout_seconds = 30
 
     def __init__(self, workspace: str, restrict: bool = False):
-        self._workspace = Path(workspace)
+        self._workspace = Path(workspace).resolve()
         self._restrict = restrict
 
     async def execute(self, params: dict[str, Any], ctx: ToolExecutionContext | None = None) -> ToolResult:
@@ -36,8 +36,11 @@ class SearchFilesTool(Tool):
         max_results = params.get("max_results", 50)
 
         search_root = (self._workspace / sub).resolve()
-        if self._restrict and not str(search_root).startswith(str(self._workspace)):
-            return ToolResult(success=False, error="Path outside workspace")
+        if self._restrict:
+            try:
+                search_root.relative_to(self._workspace)
+            except ValueError:
+                return ToolResult(success=False, error="Path outside workspace")
 
         if not search_root.is_dir():
             return ToolResult(success=False, error=f"Directory not found: {sub}")

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -31,6 +32,10 @@ class CodeExecTool(Tool):
     }
     required_permissions = [ToolPermission.EXECUTE]
     timeout_seconds = 60
+    _SENSITIVE_PATTERNS = [
+        re.compile(r"/etc/(passwd|shadow|sudoers|gshadow)\b"),
+        re.compile(r"/root/\.ssh|/etc/ssh|/root/\.gnupg"),
+    ]
 
     def __init__(self, workspace: str):
         self._workspace = Path(workspace)
@@ -39,6 +44,9 @@ class CodeExecTool(Tool):
         code = params["code"]
         lang = params["language"]
         timeout = min(params.get("timeout", 30), 60)
+        for pattern in self._SENSITIVE_PATTERNS:
+            if pattern.search(code):
+                return ToolResult(success=False, error="Code blocked by sensitive system file policy")
 
         runner_info = _RUNNERS.get(lang)
         if not runner_info:

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
+from pathlib import Path
 from typing import Any
 
 from echo_agent.agent.tools.base import Tool, ToolExecutionContext, ToolPermission, ToolResult
@@ -23,21 +25,38 @@ class ShellTool(Tool):
     }
     required_permissions = [ToolPermission.EXECUTE]
     timeout_seconds = 60
+    _BUILTIN_BLOCKED_PATTERNS = [
+        (re.compile(r"/etc/(passwd|shadow|sudoers|gshadow)\b"), "sensitive system account file"),
+        (re.compile(r"(^|\s)(cat|less|more|head|tail|sed|awk|grep)\s+[^\n;|&]*(/root/\.ssh|/etc/ssh|/root/\.gnupg)"), "sensitive credential path"),
+        (re.compile(r"\brm\s+-[^\n;|&]*[rf][^\n;|&]*\s+/(?:\s|$)"), "destructive root removal"),
+        (re.compile(r"\bdd\s+[^\n;|&]*\bof=/dev/"), "destructive block device write"),
+        (re.compile(r"\bmkfs(?:\.\w+)?\b"), "filesystem formatting"),
+        (re.compile(r"\b(shutdown|reboot|halt|poweroff)\b"), "system shutdown"),
+    ]
 
     def __init__(self, workspace: str, allowed: list[str] | None = None, blocked: list[str] | None = None, max_output: int = 16000):
-        self._workspace = workspace
+        self._workspace = str(Path(workspace).resolve())
         self._allowed = allowed or []
         self._blocked = blocked or []
         self._max_output = max_output
 
     def _check_command(self, command: str) -> str | None:
         cmd_name = command.strip().split()[0] if command.strip() else ""
+        for pattern, reason in self._BUILTIN_BLOCKED_PATTERNS:
+            if pattern.search(command):
+                return f"Command blocked by safety policy: {reason}"
         for pattern in self._blocked:
             if pattern in command:
                 return f"Command blocked: contains '{pattern}'"
         if self._allowed and cmd_name not in self._allowed:
             return f"Command not in allowlist: {cmd_name}"
         return None
+
+    def _resolve_cwd(self, cwd: str) -> str:
+        raw = Path(cwd).expanduser()
+        resolved = raw.resolve() if raw.is_absolute() else (Path(self._workspace) / raw).resolve()
+        resolved.relative_to(Path(self._workspace))
+        return str(resolved)
 
     async def execute(self, params: dict[str, Any], ctx: ToolExecutionContext | None = None) -> ToolResult:
         command = params["command"]
@@ -49,6 +68,10 @@ class ShellTool(Tool):
             return ToolResult(success=False, error=violation)
 
         try:
+            try:
+                cwd = self._resolve_cwd(cwd)
+            except ValueError:
+                return ToolResult(success=False, error=f"cwd is outside workspace: {cwd}")
             proc = await asyncio.create_subprocess_shell(
                 command,
                 stdout=asyncio.subprocess.PIPE,

@@ -6,7 +6,6 @@ project, and environment across sessions.
 
 from __future__ import annotations
 
-import json
 from typing import Any
 
 from echo_agent.agent.tools.base import Tool, ToolExecutionContext, ToolPermission, ToolResult
@@ -66,14 +65,25 @@ class MemoryTool(Tool):
     def __init__(self, store: MemoryStore):
         self._store = store
 
-    def _resolve_entry(self, key: str, old_text: str, mem_type: MemoryType) -> tuple[MemoryEntry | None, str | None]:
+    def _resolve_entry(
+        self,
+        key: str,
+        old_text: str,
+        mem_type: MemoryType,
+        session_key: str = "",
+    ) -> tuple[MemoryEntry | None, str | None]:
         if key:
-            entry = self._store.find_by_key(key, mem_type)
+            entry = self._store.find_by_key(key, mem_type, session_key=session_key)
             if entry:
                 return entry, None
 
         if old_text:
-            matches = self._store.find_by_content_matches(old_text, mem_type=mem_type, limit=6)
+            matches = self._store.find_by_content_matches(
+                old_text,
+                mem_type=mem_type,
+                limit=6,
+                session_key=session_key,
+            )
             if not matches:
                 return None, None
             if len(matches) > 1:
@@ -90,20 +100,21 @@ class MemoryTool(Tool):
         action = params.get("action", "")
         target = params.get("target", "user")
         mem_type = MemoryType.USER if target == "user" else MemoryType.ENVIRONMENT
+        session_key = ctx.session_key if ctx else ""
 
         if action == "add":
-            return self._add(params, mem_type)
+            return self._add(params, mem_type, session_key)
         elif action == "replace":
-            return self._replace(params, mem_type)
+            return self._replace(params, mem_type, session_key)
         elif action == "remove":
-            return self._remove(params, mem_type)
+            return self._remove(params, mem_type, session_key)
         elif action == "search":
-            return self._search(params, mem_type)
+            return self._search(params, mem_type, session_key)
         elif action == "list":
-            return self._list(mem_type)
+            return self._list(mem_type, session_key)
         return ToolResult(success=False, error=f"Unknown action '{action}'")
 
-    def _add(self, params: dict[str, Any], mem_type: MemoryType) -> ToolResult:
+    def _add(self, params: dict[str, Any], mem_type: MemoryType, session_key: str) -> ToolResult:
         key = params.get("key", "")
         content = params.get("content", "")
         if not key or not content:
@@ -115,6 +126,7 @@ class MemoryTool(Tool):
         entry = MemoryEntry(
             type=mem_type, key=key, content=content,
             tags=tags, importance=importance,
+            source_session=session_key if mem_type == MemoryType.USER else "",
         )
         try:
             result = self._store.add(entry)
@@ -122,14 +134,14 @@ class MemoryTool(Tool):
             return ToolResult(success=False, error=str(exc))
         return ToolResult(success=True, output=f"Memory saved: [{result.type.value}] {result.key}")
 
-    def _replace(self, params: dict[str, Any], mem_type: MemoryType) -> ToolResult:
+    def _replace(self, params: dict[str, Any], mem_type: MemoryType, session_key: str) -> ToolResult:
         key = params.get("key", "")
         old_text = params.get("old_text", "")
         content = params.get("content", "")
         if not content:
             return ToolResult(success=False, error="content is required for replace")
 
-        entry, resolve_error = self._resolve_entry(key, old_text, mem_type)
+        entry, resolve_error = self._resolve_entry(key, old_text, mem_type, session_key)
         if resolve_error:
             return ToolResult(success=False, error=resolve_error)
         if not entry:
@@ -141,11 +153,11 @@ class MemoryTool(Tool):
             return ToolResult(success=False, error=str(exc))
         return ToolResult(success=True, output=f"Memory updated: [{entry.type.value}] {entry.key}")
 
-    def _remove(self, params: dict[str, Any], mem_type: MemoryType) -> ToolResult:
+    def _remove(self, params: dict[str, Any], mem_type: MemoryType, session_key: str) -> ToolResult:
         key = params.get("key", "")
         old_text = params.get("old_text", "")
 
-        entry, resolve_error = self._resolve_entry(key, old_text, mem_type)
+        entry, resolve_error = self._resolve_entry(key, old_text, mem_type, session_key)
         if resolve_error:
             return ToolResult(success=False, error=resolve_error)
         if not entry:
@@ -154,12 +166,12 @@ class MemoryTool(Tool):
         self._store.delete(entry.id)
         return ToolResult(success=True, output=f"Memory removed: [{entry.type.value}] {entry.key}")
 
-    def _search(self, params: dict[str, Any], mem_type: MemoryType) -> ToolResult:
+    def _search(self, params: dict[str, Any], mem_type: MemoryType, session_key: str) -> ToolResult:
         query = params.get("query", "")
         if not query:
             return ToolResult(success=False, error="query is required for search")
 
-        results = self._store.search_scored(query, mem_type, limit=10)
+        results = self._store.search_scored(query, mem_type, limit=10, session_key=session_key)
         if not results:
             return ToolResult(success=True, output="No matching memories found.")
 
@@ -169,8 +181,8 @@ class MemoryTool(Tool):
             lines.append(f"- [{entry.type.value}] **{entry.key}**{tags} (score={score:.2f}): {entry.content}")
         return ToolResult(success=True, output="\n".join(lines))
 
-    def _list(self, mem_type: MemoryType) -> ToolResult:
-        entries = self._store.list_all(mem_type)
+    def _list(self, mem_type: MemoryType, session_key: str) -> ToolResult:
+        entries = self._store.list_all(mem_type, session_key=session_key)
         if not entries:
             return ToolResult(success=True, output=f"No {mem_type.value} memories found.")
 

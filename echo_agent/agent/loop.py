@@ -194,10 +194,10 @@ class AgentLoop:
 
         if self._snapshot_enabled:
             if event.session_key not in self._memory_snapshots:
-                self._memory_snapshots[event.session_key] = self.memory.get_snapshot()
+                self._memory_snapshots[event.session_key] = self.memory.get_snapshot(session_key=event.session_key)
             memory_ctx = build_memory_context(self.memory, snapshot=self._memory_snapshots[event.session_key])
         else:
-            memory_ctx = build_memory_context(self.memory)
+            memory_ctx = build_memory_context(self.memory, session_key=event.session_key)
 
         skills_ctx = build_skills_context(self.skill_store)
         system_prompt = self.context.build_system_prompt(memory_context=memory_ctx, skills_context=skills_ctx)
@@ -214,7 +214,7 @@ class AgentLoop:
 
         retrieval = ""
         if self.config.memory.enabled:
-            scored = self.memory.search_scored(event.text, limit=5)
+            scored = self.memory.search_scored(event.text, limit=5, session_key=event.session_key)
             if scored:
                 retrieval = "\n".join(f"- {r.key}: {r.content}" for r, _ in scored)
 
@@ -340,7 +340,7 @@ class AgentLoop:
             asyncio.create_task(self._background_skill_review(messages))
 
         if should_review_memory and total_tool_calls > 0:
-            asyncio.create_task(self._background_memory_review(messages))
+            asyncio.create_task(self._background_memory_review(messages, event.session_key))
 
         return response_text
 
@@ -358,13 +358,14 @@ class AgentLoop:
         except Exception as e:
             logger.warning("Background skill review failed: {}", e)
 
-    async def _background_memory_review(self, messages: list[dict[str, Any]]) -> None:
+    async def _background_memory_review(self, messages: list[dict[str, Any]], session_key: str) -> None:
         try:
             from echo_agent.memory.reviewer import MemoryReviewer
             reviewer = MemoryReviewer(
                 provider=self.provider,
                 store=self.memory,
                 model=self.config.models.default_model,
+                session_key=session_key,
             )
             actions = await reviewer.review(messages)
             if actions:

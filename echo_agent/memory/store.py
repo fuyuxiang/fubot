@@ -250,6 +250,22 @@ class MemoryStore:
     def _typed_entries(self, mem_type: MemoryType) -> list[MemoryEntry]:
         return [entry for entry in self._entries.values() if entry.type == mem_type]
 
+    def _visible_in_session(self, entry: MemoryEntry, session_key: str | None = None) -> bool:
+        if not session_key:
+            return True
+        if entry.type == MemoryType.ENVIRONMENT:
+            return True
+        if "global" in entry.tags:
+            return True
+        return entry.source_session == session_key
+
+    def _same_scope(self, existing: MemoryEntry, incoming: MemoryEntry) -> bool:
+        if existing.type != incoming.type:
+            return False
+        if incoming.type == MemoryType.ENVIRONMENT:
+            return True
+        return existing.source_session == incoming.source_session
+
     def _load_type_from_disk(self, mem_type: MemoryType) -> list[MemoryEntry]:
         path = self._path_for(mem_type)
         if not path.exists():
@@ -307,7 +323,7 @@ class MemoryStore:
         if not entry.key:
             return None
         for existing in self._typed_entries(entry.type):
-            if existing.key == entry.key:
+            if existing.key == entry.key and self._same_scope(existing, entry):
                 return existing
         return None
 
@@ -351,7 +367,11 @@ class MemoryStore:
                 (
                     existing
                     for existing in self._typed_entries(entry.type)
-                    if existing.key == entry.key and existing.content == entry.content
+                    if (
+                        existing.key == entry.key
+                        and existing.content == entry.content
+                        and self._same_scope(existing, entry)
+                    )
                 ),
                 None,
             )
@@ -417,19 +437,29 @@ class MemoryStore:
     def get(self, entry_id: str) -> MemoryEntry | None:
         return self._entries.get(entry_id)
 
-    def list_all(self, mem_type: MemoryType | None = None) -> list[MemoryEntry]:
+    def list_all(self, mem_type: MemoryType | None = None, session_key: str | None = None) -> list[MemoryEntry]:
         entries = list(self._entries.values())
         if mem_type is not None:
             entries = [entry for entry in entries if entry.type == mem_type]
+        if session_key:
+            entries = [entry for entry in entries if self._visible_in_session(entry, session_key)]
         return sorted(entries, key=lambda entry: entry.updated_at or "", reverse=True)
 
     # ── Search ───────────────────────────────────────────────────────────────
 
-    def search_keyword(self, query: str, mem_type: MemoryType | None = None, limit: int = 20) -> list[MemoryEntry]:
+    def search_keyword(
+        self,
+        query: str,
+        mem_type: MemoryType | None = None,
+        limit: int = 20,
+        session_key: str | None = None,
+    ) -> list[MemoryEntry]:
         pattern = re.compile(re.escape(query), re.IGNORECASE)
         results: list[MemoryEntry] = []
         for entry in self._entries.values():
             if mem_type and entry.type != mem_type:
+                continue
+            if not self._visible_in_session(entry, session_key):
                 continue
             matched = (
                 pattern.search(entry.content)
@@ -447,6 +477,7 @@ class MemoryStore:
         query: str,
         mem_type: MemoryType | None = None,
         limit: int = 10,
+        session_key: str | None = None,
     ) -> list[tuple[MemoryEntry, float]]:
         """Multi-keyword scored search. Returns (entry, score) pairs sorted by score."""
         words = [
@@ -456,12 +487,14 @@ class MemoryStore:
         if not words:
             return [
                 (entry, entry.effective_importance(self._decay_half_life))
-                for entry in self.search_keyword(query, mem_type, limit)
+                for entry in self.search_keyword(query, mem_type, limit, session_key=session_key)
             ]
 
         scored: list[tuple[MemoryEntry, float]] = []
         for entry in self._entries.values():
             if mem_type and entry.type != mem_type:
+                continue
+            if not self._visible_in_session(entry, session_key):
                 continue
             haystack = f"{entry.key} {entry.content} {' '.join(entry.tags)}".lower()
             word_hits = sum(1 for word in words if word in haystack)
@@ -476,17 +509,31 @@ class MemoryStore:
         scored.sort(key=lambda item: item[1], reverse=True)
         return scored[:limit]
 
-    def find_by_key(self, key: str, mem_type: MemoryType | None = None) -> MemoryEntry | None:
+    def find_by_key(
+        self,
+        key: str,
+        mem_type: MemoryType | None = None,
+        session_key: str | None = None,
+    ) -> MemoryEntry | None:
         normalized_key = key.strip()
         if not normalized_key:
             return None
         for entry in self._entries.values():
-            if entry.key == normalized_key and (mem_type is None or entry.type == mem_type):
+            if (
+                entry.key == normalized_key
+                and (mem_type is None or entry.type == mem_type)
+                and self._visible_in_session(entry, session_key)
+            ):
                 return entry
         return None
 
-    def find_by_content(self, substring: str, mem_type: MemoryType | None = None) -> MemoryEntry | None:
-        matches = self.find_by_content_matches(substring, mem_type=mem_type, limit=1)
+    def find_by_content(
+        self,
+        substring: str,
+        mem_type: MemoryType | None = None,
+        session_key: str | None = None,
+    ) -> MemoryEntry | None:
+        matches = self.find_by_content_matches(substring, mem_type=mem_type, limit=1, session_key=session_key)
         return matches[0] if matches else None
 
     def find_by_content_matches(
@@ -494,6 +541,7 @@ class MemoryStore:
         substring: str,
         mem_type: MemoryType | None = None,
         limit: int | None = 10,
+        session_key: str | None = None,
     ) -> list[MemoryEntry]:
         normalized = substring.strip()
         if not normalized:
@@ -501,6 +549,8 @@ class MemoryStore:
         results: list[MemoryEntry] = []
         for entry in self._entries.values():
             if mem_type and entry.type != mem_type:
+                continue
+            if not self._visible_in_session(entry, session_key):
                 continue
             if normalized in entry.content or normalized in entry.key:
                 results.append(entry)
@@ -536,9 +586,10 @@ class MemoryStore:
         mem_type: MemoryType | None = None,
         max_entries: int = 50,
         max_chars: int | None = None,
+        session_key: str | None = None,
     ) -> str:
         entries = sorted(
-            self.list_all(mem_type)[:max_entries],
+            self.list_all(mem_type, session_key=session_key)[:max_entries],
             key=lambda entry: entry.effective_importance(self._decay_half_life),
             reverse=True,
         )
@@ -561,7 +612,7 @@ class MemoryStore:
             used += delta
         return "\n".join(lines)
 
-    def get_snapshot(self) -> str:
+    def get_snapshot(self, session_key: str | None = None) -> str:
         """Build a bounded memory snapshot for system prompt injection."""
         parts: list[str] = []
         long_term = self.read_long_term()
@@ -572,9 +623,10 @@ class MemoryStore:
             MemoryType.USER,
             max_entries=30,
             max_chars=self._user_snapshot_char_limit,
+            session_key=session_key,
         )
         if user_ctx:
-            parts.append(f"## User Memory\n\n{user_ctx}")
+            parts.append(f"## Session User Memory\n\n{user_ctx}")
 
         env_ctx = self.get_context(
             MemoryType.ENVIRONMENT,

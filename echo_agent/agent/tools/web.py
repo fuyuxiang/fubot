@@ -32,12 +32,20 @@ class WebFetchTool(Tool):
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.get(url, proxy=self._proxy, timeout=aiohttp.ClientTimeout(total=self.timeout_seconds)) as resp:
-                    if resp.status >= 400:
-                        return ToolResult(success=False, error=f"HTTP {resp.status}")
                     text = await resp.text()
+                    original_len = len(text)
                     if len(text) > max_chars:
-                        text = text[:max_chars] + f"\n... (truncated, {len(text)} total)"
-                    return ToolResult(output=text, metadata={"status": resp.status, "url": str(resp.url)})
+                        text = text[:max_chars] + f"\n... (truncated, {original_len} total)"
+                    content_type = resp.headers.get("content-type", "")
+                    header = (
+                        f"HTTP {resp.status} {resp.reason or ''}\n"
+                        f"URL: {resp.url}\n"
+                        f"Content-Type: {content_type}\n\n"
+                    )
+                    metadata = {"status": resp.status, "url": str(resp.url), "content_type": content_type}
+                    if resp.status >= 400:
+                        return ToolResult(success=False, error=header + text, metadata=metadata)
+                    return ToolResult(output=header + text, metadata=metadata)
         except Exception as e:
             return ToolResult(success=False, error=str(e))
 

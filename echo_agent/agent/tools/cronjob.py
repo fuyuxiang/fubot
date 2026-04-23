@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from echo_agent.agent.tools.base import Tool, ToolExecutionContext, ToolPermission, ToolResult
-from echo_agent.scheduler.service import Scheduler
+from echo_agent.scheduler.service import ScheduledJob, Scheduler, TriggerKind
 
 
 class CronjobTool(Tool):
@@ -39,23 +39,31 @@ class CronjobTool(Tool):
             command = params.get("command", "")
             if not schedule or not command:
                 return ToolResult(success=False, error="Both 'schedule' and 'command' are required for create")
-            job_id = await self._scheduler.add_job(name=name, schedule=schedule, payload=command)
-            return ToolResult(output=f"Created job '{name}' (id={job_id}): {schedule}", metadata={"job_id": job_id})
+            job = ScheduledJob(
+                name=name,
+                trigger=TriggerKind.CRON,
+                cron_expr=schedule,
+                payload={"command": command},
+            )
+            created = self._scheduler.add_job(job)
+            return ToolResult(output=f"Created job '{name}' (id={created.id}): {schedule}", metadata={"job_id": created.id})
 
         if action == "list":
-            jobs = await self._scheduler.list_jobs()
+            jobs = self._scheduler.list_jobs()
             if not jobs:
                 return ToolResult(output="No scheduled jobs.")
             lines = []
             for j in jobs:
-                lines.append(f"{j['id']}: [{j.get('schedule', '')}] {j.get('name', '')} — {j.get('payload', '')[:60]}")
+                payload = j.payload.get("command", "") if isinstance(j.payload, dict) else str(j.payload)
+                schedule = j.cron_expr or str(j.interval_ms) or str(j.at_ms)
+                lines.append(f"{j.id}: [{schedule}] {j.name} — {payload[:60]}")
             return ToolResult(output="\n".join(lines))
 
         if action == "delete":
             job_id = params.get("job_id", "")
             if not job_id:
                 return ToolResult(success=False, error="'job_id' required for delete")
-            removed = await self._scheduler.remove_job(job_id)
+            removed = self._scheduler.remove_job(job_id)
             if removed:
                 return ToolResult(output=f"Deleted job {job_id}")
             return ToolResult(success=False, error=f"Job '{job_id}' not found")

@@ -24,7 +24,7 @@ models:
   routes: []
 
 tools:
-  restrictToWorkspace: false
+  restrictToWorkspace: true
   exec:
     enabled: true
     timeoutSeconds: 30

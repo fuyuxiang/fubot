@@ -218,6 +218,13 @@ class Scheduler:
     def list_jobs(self) -> list[ScheduledJob]:
         return list(self._jobs.values())
 
+    async def trigger_job(self, job_id: str) -> bool:
+        job = self._jobs.get(job_id)
+        if not job or not job.enabled or job.status in (JobStatus.CANCELLED, JobStatus.COMPLETED):
+            return False
+        await self._execute_job(job)
+        return True
+
     async def fire_event(self, event_name: str) -> int:
         job_ids = self._event_handlers.get(event_name, [])
         count = 0
@@ -249,7 +256,7 @@ class Scheduler:
         job.run_count += 1
         try:
             if self._on_job:
-                result = await self._on_job(job)
+                await self._on_job(job)
                 job.last_status = "success"
                 job.last_error = ""
             else:

@@ -25,14 +25,17 @@ class PatchTool(Tool):
     timeout_seconds = 15
 
     def __init__(self, workspace: str, restrict: bool = False):
-        self._workspace = Path(workspace)
+        self._workspace = Path(workspace).resolve()
         self._restrict = restrict
 
     async def execute(self, params: dict[str, Any], ctx: ToolExecutionContext | None = None) -> ToolResult:
         rel = params["file_path"]
         target = (self._workspace / rel).resolve()
-        if self._restrict and not str(target).startswith(str(self._workspace)):
-            return ToolResult(success=False, error="Path outside workspace")
+        if self._restrict:
+            try:
+                target.relative_to(self._workspace)
+            except ValueError:
+                return ToolResult(success=False, error="Path outside workspace")
 
         patch_text = params["patch"]
         threshold = params.get("fuzzy_threshold", 0.6)
@@ -164,7 +167,7 @@ class PatchTool(Tool):
             ratio = difflib.SequenceMatcher(None, search, candidate).ratio()
             if ratio > best_ratio:
                 best_ratio = ratio
-                start = sum(len(l) for l in lines[:i])
+                start = sum(len(line) for line in lines[:i])
                 end = start + len(candidate)
                 best_pos = (start, end)
         return best_pos

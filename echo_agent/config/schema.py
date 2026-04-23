@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Any, Literal
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic.alias_generators import to_camel
@@ -250,7 +249,7 @@ class MCPServerConfig(_Base):
 class ToolsConfig(_Base):
     exec: ExecToolConfig = Field(default_factory=ExecToolConfig)
     web: WebToolConfig = Field(default_factory=WebToolConfig)
-    restrict_to_workspace: bool = False
+    restrict_to_workspace: bool = True
     mcp_servers: dict[str, MCPServerConfig] = Field(default_factory=dict)
     image_gen: ImageGenConfig = Field(default_factory=ImageGenConfig)
     tts: TTSConfig = Field(default_factory=TTSConfig)

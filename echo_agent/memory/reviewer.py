@@ -6,7 +6,6 @@ user preferences, project facts, or lessons learned should be persisted.
 
 from __future__ import annotations
 
-import json
 from typing import Any
 
 from loguru import logger
@@ -25,6 +24,8 @@ Focus on:
 Guidelines:
 - Only save information that would be useful in future conversations.
 - Do NOT save trivial or one-off details.
+- User names, identity facts, and personal preferences belong only to the current session/user.
+  Do not turn a name from one chat into a global default form of address.
 - If a memory with the same key already exists, use "replace" to update it.
 - Keep memory content concise and factual.
 
@@ -58,18 +59,24 @@ _TOOL_DEFS = [
 class MemoryReviewer:
     """Reviews conversations and auto-extracts memories."""
 
-    def __init__(self, provider: LLMProvider, store: MemoryStore, model: str = ""):
+    def __init__(self, provider: LLMProvider, store: MemoryStore, model: str = "", session_key: str = ""):
         self._provider = provider
         self._store = store
         self._model = model
+        self._session_key = session_key
 
     def _resolve_entry(self, key: str, old_text: str, mem_type: MemoryType) -> tuple[MemoryEntry | None, str | None]:
         if key:
-            entry = self._store.find_by_key(key, mem_type)
+            entry = self._store.find_by_key(key, mem_type, session_key=self._session_key)
             if entry:
                 return entry, None
         if old_text:
-            matches = self._store.find_by_content_matches(old_text, mem_type=mem_type, limit=6)
+            matches = self._store.find_by_content_matches(
+                old_text,
+                mem_type=mem_type,
+                limit=6,
+                session_key=self._session_key,
+            )
             if not matches:
                 return None, None
             if len(matches) > 1:
@@ -130,7 +137,13 @@ class MemoryReviewer:
         if action == "add":
             if not key or not content:
                 return "Error: key and content required"
-            entry = MemoryEntry(type=mem_type, key=key, content=content, importance=importance)
+            entry = MemoryEntry(
+                type=mem_type,
+                key=key,
+                content=content,
+                importance=importance,
+                source_session=self._session_key if mem_type == MemoryType.USER else "",
+            )
             try:
                 result = self._store.add(entry)
             except ValueError as exc:
@@ -144,7 +157,13 @@ class MemoryReviewer:
             if resolve_error:
                 return resolve_error
             if not entry:
-                entry = MemoryEntry(type=mem_type, key=key or "auto", content=content, importance=importance)
+                entry = MemoryEntry(
+                    type=mem_type,
+                    key=key or "auto",
+                    content=content,
+                    importance=importance,
+                    source_session=self._session_key if mem_type == MemoryType.USER else "",
+                )
                 try:
                     self._store.add(entry)
                 except ValueError as exc:
