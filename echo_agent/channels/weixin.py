@@ -505,12 +505,19 @@ class WeixinChannel(BaseChannel):
             body = _json_dumps({"base_info": {"channel_version": _CHANNEL_VERSION}, "bot_type": 3})
             url = f"{base_url}/{_EP_GET_BOT_QR}"
             async with session.post(url, data=body.encode(), headers=_headers(None, body)) as resp:
+                if resp.status != 200:
+                    logger.error("weixin: get_bot_qrcode HTTP %s: %s", resp.status, await resp.text())
+                    return None
                 data = await resp.json(content_type=None)
+
+            errcode = data.get("errcode") or data.get("err_code")
+            if errcode:
+                logger.error("weixin: get_bot_qrcode returned error %s: %s", errcode, data.get("errmsg") or data.get("err_msg") or data)
 
             qrcode = data.get("qrcode")
             qr_url = data.get("qrcode_img_content")
             if not qrcode:
-                logger.error("weixin: failed to get QR code")
+                logger.error("weixin: failed to get QR code, response: %s", data)
                 return None
 
             print(f"\nScan this QR code with WeChat:\n{qr_url}\n")

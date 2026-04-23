@@ -67,8 +67,21 @@ def setup_model(config: dict) -> None:
     print_info("Choose your inference provider and model.")
     print()
 
+    existing_providers = config.get("models", {}).get("providers", [])
+    existing_provider = existing_providers[0] if existing_providers else {}
+    existing_name = existing_provider.get("name", "")
+    existing_key = existing_provider.get("apiKey", "")
+    existing_base = existing_provider.get("apiBase", "")
+    existing_model = config.get("models", {}).get("defaultModel", "")
+
+    provider_default = 0
+    for i, (key, _, _) in enumerate(PROVIDERS):
+        if key == existing_name or (existing_name == "openai" and key == "custom" and existing_base):
+            provider_default = i
+            break
+
     provider_names = [p[1] for p in PROVIDERS]
-    idx = prompt_choice("Select provider:", provider_names)
+    idx = prompt_choice("Select provider:", provider_names, default=provider_default)
     provider_key, provider_label, preset_models = PROVIDERS[idx]
 
     api_key = ""
@@ -77,23 +90,36 @@ def setup_model(config: dict) -> None:
     if provider_key == "bedrock":
         print_info("Bedrock uses AWS credentials from environment (AWS_ACCESS_KEY_ID, etc.)")
     elif provider_key == "custom":
-        api_base = prompt("  API base URL")
-        api_key = prompt("  API key", password=True)
+        api_base = prompt("  API base URL", default=existing_base)
+        if existing_key:
+            api_key = prompt("  API key [****saved, Enter to keep]", password=True)
+            if not api_key:
+                api_key = existing_key
+        else:
+            api_key = prompt("  API key", password=True)
     else:
-        api_key = prompt(f"  {provider_label} API key", password=True)
-        if not api_key:
-            print_warning("No API key provided. You can set it later in echo-agent.yaml")
+        if existing_key and existing_name == provider_key:
+            api_key = prompt(f"  {provider_label} API key [****saved, Enter to keep]", password=True)
+            if not api_key:
+                api_key = existing_key
+        else:
+            api_key = prompt(f"  {provider_label} API key", password=True)
+            if not api_key:
+                print_warning("No API key provided. You can set it later in echo-agent.yaml")
 
     # Model selection
     if preset_models:
+        model_default = 0
+        if existing_model in preset_models:
+            model_default = preset_models.index(existing_model)
         model_choices = preset_models + ["Enter custom model name"]
-        model_idx = prompt_choice("Select default model:", model_choices)
+        model_idx = prompt_choice("Select default model:", model_choices, default=model_default)
         if model_idx == len(preset_models):
-            default_model = prompt("  Model name")
+            default_model = prompt("  Model name", default=existing_model)
         else:
             default_model = preset_models[model_idx]
     else:
-        default_model = prompt("  Default model name", default="gpt-4o")
+        default_model = prompt("  Default model name", default=existing_model or "gpt-4o")
 
     actual_name = provider_key if provider_key != "custom" else "openai"
 
@@ -140,8 +166,15 @@ def setup_channels(config: dict) -> None:
     print_info("Select channels to configure. CLI is always enabled.")
     print()
 
+    existing_channels = config.get("channels", {})
+    pre_selected = []
+    for i, (ch_key, _, _) in enumerate(CHANNEL_DEFS):
+        ch_cfg = existing_channels.get(ch_key, {})
+        if isinstance(ch_cfg, dict) and ch_cfg.get("enabled"):
+            pre_selected.append(i)
+
     channel_names = [c[1] for c in CHANNEL_DEFS]
-    selected = prompt_checklist("Enable channels:", channel_names)
+    selected = prompt_checklist("Enable channels:", channel_names, pre_selected=pre_selected or None)
 
     if not selected:
         print_info("No extra channels selected. CLI will be used.")
@@ -171,18 +204,21 @@ def setup_channels(config: dict) -> None:
 def setup_advanced(config: dict) -> None:
     print_header("Advanced Settings")
 
-    ws = prompt("  Workspace directory", default=".")
+    ws = prompt("  Workspace directory", default=config.get("workspace", "."))
     if ws and ws != ".":
         config["workspace"] = ws
 
     log_choices = ["INFO", "DEBUG", "WARNING", "ERROR"]
-    log_idx = prompt_choice("Log level:", log_choices, default=0)
+    existing_log = config.get("observability", {}).get("logLevel", "INFO")
+    log_default = log_choices.index(existing_log) if existing_log in log_choices else 0
+    log_idx = prompt_choice("Log level:", log_choices, default=log_default)
     config.setdefault("observability", {})["logLevel"] = log_choices[log_idx]
 
-    if prompt_yes_no("Enable gateway (Web API)?", default=False):
+    existing_gw = config.get("gateway", {})
+    if prompt_yes_no("Enable gateway (Web API)?", default=existing_gw.get("enabled", False)):
         gw = config.setdefault("gateway", {})
         gw["enabled"] = True
-        gw["port"] = int(prompt("  Gateway port", default="9000") or "9000")
+        gw["port"] = int(prompt("  Gateway port", default=str(existing_gw.get("port", 9000))) or "9000")
 
     print_success("Advanced settings configured")
 

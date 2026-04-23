@@ -368,7 +368,8 @@ class AgentLoop:
             chunk = session.messages[session.last_consolidated:]
             if await self.consolidator.consolidate_chunk(chunk):
                 session.last_consolidated = len(session.messages)
-                await self.sessions.save(session)        except Exception as e:
+                await self.sessions.save(session)
+        except Exception as e:
             logger.error("Consolidation failed for {}: {}", session.key, e)
 
     async def process_direct(self, content: str, session_key: str = "cli:direct") -> str:
