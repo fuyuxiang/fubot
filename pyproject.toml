@@ -6,7 +6,18 @@ build-backend = "hatchling.build"
 name = "echo-agent"
 version = "0.1.0"
 description = "A modular AI agent framework with multi-channel support"
+readme = "README.md"
 requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Echo Agent contributors" }]
+keywords = ["ai", "agent", "assistant", "chatbot", "runtime"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
 dependencies = [
     "pydantic>=2.0",
     "pydantic-settings>=2.0",
@@ -33,6 +44,36 @@ dev = ["ruff>=0.4"]
 
 [project.scripts]
 echo-agent = "echo_agent.__main__:main"
+
+[tool.hatch.build]
+include = [
+    "echo_agent/**/*.py",
+    "echo_agent/config/**/*.yaml",
+    "echo_agent/gateway/static/**/*",
+    "skills/**/*.md",
+    "skills/**/*.py",
+    "skills/**/*.sh",
+    "README.md",
+    "scripts/install.sh",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["echo_agent"]
+
+[tool.hatch.build.targets.wheel.sources]
+"echo_agent" = "echo_agent"
+
+[tool.hatch.build.targets.wheel.force-include]
+"skills" = "echo_agent/_bundled/skills"
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "echo_agent/",
+    "skills/",
+    "scripts/install.sh",
+    "README.md",
+    "pyproject.toml",
+]
 
 [tool.ruff]
 line-length = 120

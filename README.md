@@ -225,35 +225,51 @@ Provider 层当前还带有：
 
 ## 快速开始
 
-### 1. 安装
+### 1. 一键安装
 
 ```bash
-git clone git@github.com:fuyuxiang/echo-agent.git
+curl -fsSL https://raw.githubusercontent.com/fuyuxiang/echo-agent/main/scripts/install.sh | bash
+```
+
+适用于 Linux、macOS 和 WSL2。安装脚本会自动：
+
+- 安装 `uv` 与 Python 3.11（如缺失）
+- 将仓库克隆到 `~/.echo-agent/echo-agent`
+- 创建虚拟环境并安装 `echo-agent`
+- 把命令链接到 `~/.local/bin/echo-agent`
+- 默认把配置和数据放到 `~/.echo-agent/`
+
+安装完成后，重新加载 shell：
+
+```bash
+source ~/.bashrc    # 或 ~/.zshrc
+echo-agent setup
+echo-agent
+```
+
+如果你只想手动安装或参与开发，可以使用源码安装：
+
+```bash
+git clone https://github.com/fuyuxiang/echo-agent.git
 cd echo-agent
-pip install -e ".[all]"
-```
-
-如果你想使用本地 TTS 后端，再额外安装：
-
-```bash
-pip install edge-tts
-```
-
-只需要特定 provider 时，也可以按需安装：
-
-```bash
-pip install -e ".[openai]"
-pip install -e ".[anthropic]"
-pip install -e ".[gemini]"
-pip install -e ".[bedrock]"
+curl -LsSf https://astral.sh/uv/install.sh | sh
+uv venv venv --python 3.11
+source venv/bin/activate
+uv pip install -e ".[all]"
 ```
 
 ### 2. 初始化配置
 
-第一次在交互式终端里运行 `echo-agent` 时，如果当前目录没有配置文件，程序会提示是否启动 setup wizard。你也可以显式执行：
+全局安装默认读取 `~/.echo-agent/echo-agent.yaml`。第一次在交互式终端里运行 `echo-agent` 时，如果当前目录和 `~/.echo-agent/` 都没有配置文件，程序会提示是否启动 setup wizard。你也可以显式执行：
 
 ```bash
 echo-agent setup
+```
+
+如果你想把配置和工作区放到当前项目目录，而不是 `~/.echo-agent/`：
+
+```bash
+echo-agent setup -w .
 ```
 
 常用命令：
@@ -268,10 +284,16 @@ echo-agent gateway --port 9000
 
 ### 3. 准备一份最小可用配置
 
-在项目根目录创建 `echo-agent.yaml`：
+默认全局配置文件位置：
+
+```text
+~/.echo-agent/echo-agent.yaml
+```
+
+最小可用示例：
 
 ```yaml
-workspace: "."
+workspace: "~/.echo-agent"
 
 models:
   defaultModel: "gpt-4o-mini"
@@ -290,10 +312,12 @@ permissions:
 
 这份配置的含义是：
 
-- 使用当前目录作为工作区
+- 使用 `~/.echo-agent` 作为默认工作区
 - 启用 CLI 通道
 - 让本地 CLI 用户 `cli_user` 具备工具使用权限
 - 使用 OpenAI 作为默认模型提供方
+
+如果你是按项目使用 Echo Agent，可以把 `workspace` 改成 `"."`，并将配置保存到项目目录下的 `echo-agent.yaml`。
 
 如果你还需要 Web 搜索，可以继续加：
 
@@ -312,6 +336,7 @@ echo-agent
 或者显式指定：
 
 ```bash
+echo-agent run -c ~/.echo-agent/echo-agent.yaml
 echo-agent run -c echo-agent.yaml -w .
 ```
 

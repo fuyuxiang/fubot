@@ -8,11 +8,22 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import Awaitable, Callable
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any
 
 from loguru import logger
+
+StreamDeltaCallback = Callable[[str], Awaitable[None] | None]
+
+
+async def _invoke_stream_callback(callback: StreamDeltaCallback | None, delta: str) -> None:
+    if callback is None or not delta:
+        return
+    result = callback(delta)
+    if asyncio.iscoroutine(result):
+        await result
 
 
 @dataclass
@@ -81,6 +92,21 @@ class LLMProvider(ABC):
     def get_default_model(self) -> str:
         """Return the default model identifier."""
 
+    async def chat_stream(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        model: str | None = None,
+        tool_choice: str | dict | None = None,
+        on_delta: StreamDeltaCallback | None = None,
+        **kwargs: Any,
+    ) -> LLMResponse:
+        """Stream text deltas when supported, otherwise fall back to a full response."""
+        response = await self.chat(messages, tools, model, tool_choice, **kwargs)
+        if response.finish_reason != "error" and response.content:
+            await _invoke_stream_callback(on_delta, response.content)
+        return response
+
     def _is_transient(self, error_text: str) -> bool:
         lower = error_text.lower()
         return any(m in lower for m in self._TRANSIENT_MARKERS)
@@ -104,5 +130,57 @@ class LLMProvider(ABC):
 
         try:
             return await self.chat(**kwargs)
+        except Exception as e:
+            return LLMResponse(content=f"Error: {e}", finish_reason="error")
+
+    async def chat_stream_with_retry(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        model: str | None = None,
+        tool_choice: str | dict | None = None,
+        on_delta: StreamDeltaCallback | None = None,
+        **kwargs: Any,
+    ) -> LLMResponse:
+        emitted = False
+
+        async def wrapped(delta: str) -> None:
+            nonlocal emitted
+            emitted = True
+            await _invoke_stream_callback(on_delta, delta)
+
+        for attempt, delay in enumerate(self._RETRY_DELAYS):
+            emitted = False
+            try:
+                response = await self.chat_stream(
+                    messages=messages,
+                    tools=tools,
+                    model=model,
+                    tool_choice=tool_choice,
+                    on_delta=wrapped,
+                    **kwargs,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                response = LLMResponse(content=f"Error: {e}", finish_reason="error")
+
+            if response.finish_reason != "error":
+                return response
+            if emitted or not self._is_transient(response.content or ""):
+                return response
+
+            logger.warning("LLM transient stream error (attempt {}), retrying in {}s", attempt + 1, delay)
+            await asyncio.sleep(delay)
+
+        try:
+            return await self.chat_stream(
+                messages=messages,
+                tools=tools,
+                model=model,
+                tool_choice=tool_choice,
+                on_delta=wrapped,
+                **kwargs,
+            )
         except Exception as e:
             return LLMResponse(content=f"Error: {e}", finish_reason="error")

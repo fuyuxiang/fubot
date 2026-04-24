@@ -8,7 +8,7 @@ from loguru import logger
 
 from echo_agent.config.schema import ProviderConfig
 from echo_agent.models.credential_pool import CredentialPool
-from echo_agent.models.provider import LLMProvider, LLMResponse
+from echo_agent.models.provider import LLMProvider, LLMResponse, StreamDeltaCallback
 from echo_agent.models.rate_limiter import RateLimitedProvider, TokenBucketLimiter
 
 _PROVIDER_MAP: dict[str, str] = {
@@ -85,6 +85,51 @@ class _PooledProvider(LLMProvider):
             self._inner._client = self._inner._build_client()
             logger.info("Rotated to next credential in pool")
             resp = await self._inner.chat(messages, tools, model, tool_choice, **kwargs)
+            if resp.finish_reason != "error":
+                self._pool.report_success(next_key)
+        else:
+            self._pool.report_success(self._inner.api_key)
+        return resp
+
+    async def chat_stream(
+        self,
+        messages,
+        tools=None,
+        model=None,
+        tool_choice=None,
+        on_delta: StreamDeltaCallback | None = None,
+        **kwargs,
+    ):
+        emitted = False
+
+        async def wrapped(delta: str) -> None:
+            nonlocal emitted
+            emitted = True
+            if on_delta:
+                await on_delta(delta)
+
+        resp = await self._inner.chat_stream(
+            messages,
+            tools,
+            model,
+            tool_choice,
+            on_delta=wrapped,
+            **kwargs,
+        )
+        if resp.finish_reason == "error" and self._pool.size > 1 and not emitted:
+            self._pool.report_error(self._inner.api_key)
+            next_key = self._pool.get_next()
+            self._inner.api_key = next_key
+            self._inner._client = self._inner._build_client()
+            logger.info("Rotated to next credential in pool")
+            resp = await self._inner.chat_stream(
+                messages,
+                tools,
+                model,
+                tool_choice,
+                on_delta=wrapped,
+                **kwargs,
+            )
             if resp.finish_reason != "error":
                 self._pool.report_success(next_key)
         else:

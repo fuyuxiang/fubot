@@ -20,7 +20,8 @@ from echo_agent.cli.prompt import (
     prompt_choice,
     prompt_yes_no,
 )
-from echo_agent.config.loader import save_config, _find_config_file
+from echo_agent.config.loader import find_local_config_file, resolve_config_file, save_config
+from echo_agent.runtime_paths import default_config_path
 
 
 # ── Provider presets ────────────────────────────────────────────────────────
@@ -270,8 +271,8 @@ def _setup_config_target(config_path: str | Path | None = None, workspace: str |
         return Path(config_path).expanduser()
     if workspace:
         ws = Path(workspace).expanduser()
-        return _find_config_file(ws) or ws / "echo-agent.yaml"
-    return _find_config_file()
+        return find_local_config_file(ws) or ws / "echo-agent.yaml"
+    return resolve_config_file() or default_config_path()
 
 
 def run_setup_wizard(
@@ -285,13 +286,16 @@ def run_setup_wizard(
         return
 
     # Load existing config if present
-    existing_file = _setup_config_target(config_path=config_path, workspace=workspace)
+    config_target = _setup_config_target(config_path=config_path, workspace=workspace)
+    existing_file = resolve_config_file(config_path=config_path, search_dir=workspace)
     config: dict = {}
     if existing_file and existing_file.exists():
         import yaml
         with open(existing_file, encoding="utf-8") as f:
             config = yaml.safe_load(f) or {}
-    if workspace and "workspace" not in config:
+    if workspace and (not config_target or not config_target.exists()):
+        config["workspace"] = "."
+    elif workspace and "workspace" not in config:
         config["workspace"] = "."
 
     # Section-specific setup
@@ -300,7 +304,7 @@ def run_setup_wizard(
             if key == section:
                 _print_banner()
                 func(config)
-                path = save_config(config, existing_file)
+                path = save_config(config, config_target)
                 print_success(f"{label} configuration saved to {path}")
                 return
         print_error(f"Unknown section: {section}")
@@ -328,7 +332,7 @@ def run_setup_wizard(
             return
         elif choice == 0:
             setup_model(config)
-            path = save_config(config, existing_file)
+            path = save_config(config, config_target)
             _print_summary(config, path)
             return
         elif choice == 1:
@@ -336,7 +340,7 @@ def run_setup_wizard(
         elif 2 <= choice <= 4:
             _, label, func = SETUP_SECTIONS[choice - 2]
             func(config)
-            path = save_config(config, existing_file)
+            path = save_config(config, config_target)
             print_success(f"{label} configuration saved to {path}")
             return
     else:
@@ -349,7 +353,7 @@ def run_setup_wizard(
             print()
             if prompt_yes_no("Configure messaging channels?", default=False):
                 setup_channels(config)
-            path = save_config(config, existing_file)
+            path = save_config(config, config_target)
             print()
             _print_summary(config, path)
             print_success("Setup complete! Run 'echo-agent' to start.")
@@ -359,14 +363,14 @@ def run_setup_wizard(
     for _key, _label, func in SETUP_SECTIONS:
         func(config)
 
-    path = save_config(config, existing_file)
+    path = save_config(config, config_target)
     print()
     _print_summary(config, path)
     print_success("Setup complete! Run 'echo-agent' to start.")
 
 
 def has_any_provider_configured(config_path: str | Path | None = None, workspace: str | Path | None = None) -> bool:
-    config_file = _setup_config_target(config_path=config_path, workspace=workspace)
+    config_file = resolve_config_file(config_path=config_path, search_dir=workspace)
     if not config_file:
         return False
     if not config_file.exists():

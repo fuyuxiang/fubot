@@ -7,7 +7,14 @@ from typing import Any
 
 from loguru import logger
 
-from echo_agent.models.provider import GenerationParams, LLMProvider, LLMResponse, ToolCallRequest
+from echo_agent.models.provider import (
+    GenerationParams,
+    LLMProvider,
+    LLMResponse,
+    StreamDeltaCallback,
+    ToolCallRequest,
+    _invoke_stream_callback,
+)
 
 
 class OpenAIProvider(LLMProvider):
@@ -48,6 +55,73 @@ class OpenAIProvider(LLMProvider):
             logger.error("OpenAI API error: {}", e)
             return LLMResponse(content=f"Error: {e}", finish_reason="error")
         return self._parse_response(resp)
+
+    async def chat_stream(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        model: str | None = None,
+        tool_choice: str | dict | None = None,
+        on_delta: StreamDeltaCallback | None = None,
+        **kwargs: Any,
+    ) -> LLMResponse:
+        params = self._build_params(messages, tools, model, tool_choice, **kwargs)
+        params["stream"] = True
+
+        try:
+            stream = await self._client.chat.completions.create(**params)
+        except Exception as e:
+            logger.warning("OpenAI stream init failed, falling back to non-streaming: {}", e)
+            return await self.chat(messages, tools, model, tool_choice, **kwargs)
+
+        text_parts: list[str] = []
+        tool_parts: dict[int, dict[str, Any]] = {}
+        finish_reason = "stop"
+        usage: dict[str, int] = {}
+        response_model = params.get("model", model or self._default_model)
+
+        try:
+            async for chunk in stream:
+                if getattr(chunk, "model", None):
+                    response_model = chunk.model or response_model
+
+                chunk_usage = getattr(chunk, "usage", None)
+                if chunk_usage:
+                    usage["prompt_tokens"] = getattr(chunk_usage, "prompt_tokens", 0) or usage.get("prompt_tokens", 0)
+                    usage["completion_tokens"] = getattr(chunk_usage, "completion_tokens", 0) or usage.get("completion_tokens", 0)
+
+                choice = chunk.choices[0] if getattr(chunk, "choices", None) else None
+                if not choice:
+                    continue
+                if choice.finish_reason:
+                    finish_reason = choice.finish_reason
+
+                delta = choice.delta
+                if not delta:
+                    continue
+
+                content = self._delta_text(delta)
+                if content:
+                    text_parts.append(content)
+                    await _invoke_stream_callback(on_delta, content)
+
+                for tc in getattr(delta, "tool_calls", None) or []:
+                    self._merge_tool_delta(tool_parts, tc)
+        except Exception as e:
+            logger.error("OpenAI streaming error: {}", e)
+            return LLMResponse(content=f"Error: {e}", finish_reason="error")
+
+        tool_calls = self._finalize_tool_calls(tool_parts)
+        if finish_reason == "stop" and tool_calls:
+            finish_reason = "tool_calls"
+
+        return LLMResponse(
+            content="".join(text_parts) if text_parts else None,
+            tool_calls=tool_calls,
+            finish_reason=finish_reason,
+            usage=usage,
+            model=response_model or "",
+        )
 
     def get_default_model(self) -> str:
         return self._default_model
@@ -120,3 +194,49 @@ class OpenAIProvider(LLMProvider):
             usage=usage,
             model=resp.model or "",
         )
+
+    @staticmethod
+    def _delta_text(delta: Any) -> str:
+        content = getattr(delta, "content", None)
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts = []
+            for item in content:
+                text = getattr(item, "text", None)
+                if text:
+                    parts.append(text)
+            return "".join(parts)
+        return ""
+
+    @staticmethod
+    def _merge_tool_delta(tool_parts: dict[int, dict[str, Any]], tc: Any) -> None:
+        index = getattr(tc, "index", None)
+        if index is None:
+            index = len(tool_parts)
+        entry = tool_parts.setdefault(index, {"id": "", "name": "", "arguments": []})
+        if getattr(tc, "id", None):
+            entry["id"] = tc.id
+        fn = getattr(tc, "function", None)
+        if fn is not None:
+            if getattr(fn, "name", None):
+                entry["name"] = fn.name
+            if getattr(fn, "arguments", None):
+                entry["arguments"].append(fn.arguments)
+
+    @staticmethod
+    def _finalize_tool_calls(tool_parts: dict[int, dict[str, Any]]) -> list[ToolCallRequest]:
+        tool_calls: list[ToolCallRequest] = []
+        for index in sorted(tool_parts):
+            entry = tool_parts[index]
+            raw_args = "".join(entry["arguments"])
+            try:
+                args = json.loads(raw_args) if raw_args else {}
+            except (json.JSONDecodeError, TypeError):
+                args = {"raw": raw_args}
+            tool_calls.append(ToolCallRequest(
+                id=entry["id"] or f"call_{index}",
+                name=entry["name"],
+                arguments=args,
+            ))
+        return tool_calls

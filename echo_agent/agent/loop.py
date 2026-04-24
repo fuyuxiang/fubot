@@ -7,7 +7,9 @@ Integrates all subsystems: session, memory, tools, permissions, observability.
 from __future__ import annotations
 
 import asyncio
+import time
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -28,9 +30,121 @@ from echo_agent.observability.monitor import TraceLogger
 from echo_agent.permissions.manager import (
     ApprovalManager, CredentialManager, Effect, PermissionLevel, PermissionManager, PermissionRule,
 )
+from echo_agent.runtime_paths import bundled_skills_dir
 from echo_agent.session.manager import Session, SessionManager
 from echo_agent.skills.store import SkillStore
 from echo_agent.utils.text import strip_thinking
+
+
+@dataclass
+class _ProcessResult:
+    response_text: str = ""
+    outbound_sent: bool = False
+
+
+class _TokenStreamPublisher:
+    def __init__(
+        self,
+        bus: MessageBus,
+        event: InboundEvent,
+        *,
+        enabled: bool,
+        flush_chars: int,
+        flush_interval_ms: int,
+        intro_text: str = "",
+    ):
+        self._bus = bus
+        self._event = event
+        self._enabled = enabled
+        self._flush_chars = max(1, flush_chars)
+        self._flush_interval = max(0.05, flush_interval_ms / 1000.0)
+        self._full_text = ""
+        self._pending = ""
+        self._last_flush = time.monotonic()
+        self._sent_nonfinal = False
+        self._intro_text = intro_text.strip()
+        self._needs_intro_separator = bool(self._intro_text)
+
+    async def start(self) -> None:
+        if not self._enabled or not self._intro_text:
+            return
+        self._full_text = self._intro_text
+        self._pending = self._intro_text
+
+    async def on_delta(self, delta: str) -> None:
+        if not self._enabled or not delta:
+            return
+        if self._needs_intro_separator:
+            self._full_text += "\n\n"
+            self._pending += "\n\n"
+            self._needs_intro_separator = False
+        self._full_text += delta
+        self._pending += delta
+        now = time.monotonic()
+        if len(self._pending) >= self._flush_chars or now - self._last_flush >= self._flush_interval:
+            await self._flush(is_final=False)
+
+    async def finalize(self, final_text: str) -> bool:
+        if not self._enabled:
+            return False
+
+        if final_text.startswith(self._full_text):
+            self._pending += final_text[len(self._full_text):]
+            self._full_text = final_text
+        elif not self._sent_nonfinal:
+            self._full_text = final_text
+            self._pending = final_text
+        elif final_text != self._full_text:
+            logger.debug("Stream final text diverged from streamed text for channel {}", self._event.channel)
+            self._full_text = final_text
+
+        if self._sent_nonfinal:
+            if self._pending:
+                await self._flush(is_final=True)
+            else:
+                await self._publish("", is_final=True)
+            return True
+
+        await self._publish(final_text, is_final=True)
+        return True
+
+    async def _flush(self, *, is_final: bool) -> None:
+        text = self._pending
+        self._pending = ""
+        await self._publish(text, is_final=is_final)
+
+    async def _publish(self, text: str, *, is_final: bool) -> None:
+        outbound = OutboundEvent.text_reply(
+            channel=self._event.channel,
+            chat_id=self._event.chat_id,
+            text=text,
+            reply_to_id=self._event.reply_to_id,
+        )
+        outbound.is_final = is_final
+        outbound.message_kind = "final" if is_final else "streaming"
+        outbound.metadata = dict(self._event.metadata)
+        outbound.metadata["_inbound_event_id"] = self._event.event_id
+        outbound.metadata["_token_stream"] = True
+        await self._bus.publish_outbound(outbound)
+        self._last_flush = time.monotonic()
+        if not is_final and text:
+            self._sent_nonfinal = True
+
+
+def _resolve_builtin_skills_dir(workspace: Path, configured_path: str) -> Path | None:
+    raw_path = Path(configured_path).expanduser()
+    candidates: list[Path] = []
+    if raw_path.is_absolute():
+        candidates.append(raw_path)
+    else:
+        candidates.append(workspace / raw_path)
+        bundled = bundled_skills_dir()
+        if bundled:
+            candidates.append(bundled)
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return None
 
 
 class AgentLoop:
@@ -106,10 +220,10 @@ class AgentLoop:
         )
         self.mcp_manager: Any = None
 
-        skills_dir = workspace / config.skills.skills_dir
+        skills_dir = _resolve_builtin_skills_dir(workspace, config.skills.skills_dir)
         self.skill_store = SkillStore(
             user_dir=workspace / "data" / "skills",
-            builtin_dir=skills_dir if skills_dir.exists() else None,
+            builtin_dir=skills_dir,
             external_dirs=[Path(d) for d in config.skills.external_dirs],
             disabled=config.skills.disabled,
         )
@@ -168,29 +282,42 @@ class AgentLoop:
         trace_id = uuid.uuid4().hex[:12]
         span = self.tracer.start_span(trace_id, f"s_{trace_id}", "process_message", "input")
         try:
-            response = await self._process_event(event, trace_id)
-            if response:
+            result = await self._process_event(event, trace_id, publish_response=True)
+            response_text = result.response_text
+            if response_text and not result.outbound_sent:
                 out = OutboundEvent.text_reply(
-                    channel=event.channel,
-                    chat_id=event.chat_id,
-                    text=response,
-                    reply_to_id=event.event_id,
+                    channel=event.channel, chat_id=event.chat_id, text=response_text, reply_to_id=event.reply_to_id,
                 )
+                out.metadata = dict(event.metadata)
+                out.metadata["_inbound_event_id"] = event.event_id
                 await self.bus.publish_outbound(out)
-            self.tracer.end_span(span, metadata={"response_len": len(response or "")})
+            self.tracer.end_span(span, metadata={"response_len": len(response_text or "")})
         except Exception as e:
             logger.error("Processing failed for event {}: {}", event.event_id, e)
             self.tracer.end_span(span, error=str(e))
             error_out = OutboundEvent.text_reply(
-                channel=event.channel, chat_id=event.chat_id,
-                text=f"Sorry, an error occurred: {e}",
+                channel=event.channel, chat_id=event.chat_id, text=f"Sorry, an error occurred: {e}", reply_to_id=event.reply_to_id,
             )
+            error_out.metadata = dict(event.metadata)
+            error_out.metadata["_inbound_event_id"] = event.event_id
             await self.bus.publish_outbound(error_out)
         finally:
             self.tracer.flush_trace(trace_id)
 
-    async def _process_event(self, event: InboundEvent, trace_id: str) -> str | None:
+    async def _process_event(self, event: InboundEvent, trace_id: str, *, publish_response: bool = False) -> _ProcessResult:
         session = await self.sessions.get_or_create(event.session_key)
+        should_introduce = self._should_introduce(session)
+        intro_text = self._build_introduction(event) if should_introduce else ""
+        stream_publisher = _TokenStreamPublisher(
+            self.bus,
+            event,
+            enabled=publish_response and self._should_stream_channel(event.channel),
+            flush_chars=self.config.channels.stream_flush_chars,
+            flush_interval_ms=self.config.channels.stream_flush_interval_ms,
+            intro_text=intro_text,
+        )
+        if publish_response:
+            await stream_publisher.start()
 
         if self._snapshot_enabled:
             if event.session_key not in self._memory_snapshots:
@@ -231,11 +358,12 @@ class AgentLoop:
 
         async def _emit_progress(text: str, *, tool_hint: bool = False) -> None:
             out = OutboundEvent.text_reply(
-                channel=event.channel, chat_id=event.chat_id, text=text,
+                channel=event.channel, chat_id=event.chat_id, text=text, reply_to_id=event.reply_to_id,
             )
             out.is_final = False
             out.message_kind = "tool" if tool_hint else "progress"
-            out.metadata = {"_progress": True, "_tool_hint": tool_hint}
+            out.metadata = dict(event.metadata)
+            out.metadata.update({"_progress": True, "_tool_hint": tool_hint, "_inbound_event_id": event.event_id})
             await self.bus.publish_outbound(out)
 
         response_text = ""
@@ -244,10 +372,11 @@ class AgentLoop:
         total_tool_calls = 0
         for iteration in range(self._max_iterations):
             llm_span = self.tracer.start_span(trace_id, f"llm_{iteration}", "llm_call", "llm_call")
-            response = await self.provider.chat_with_retry(
+            response = await self.provider.chat_stream_with_retry(
                 messages=messages,
                 tools=tool_defs if tool_defs else None,
                 model=self.config.models.default_model,
+                on_delta=stream_publisher.on_delta if publish_response else None,
             )
             self.tracer.end_span(
                 llm_span,
@@ -329,6 +458,8 @@ class AgentLoop:
 
         if response_text:
             response_text = strip_thinking(response_text)
+        if intro_text:
+            response_text = f"{intro_text}\n\n{response_text}" if response_text else intro_text
 
         session.add_message("assistant", response_text)
         await self.sessions.save(session)
@@ -342,7 +473,41 @@ class AgentLoop:
         if should_review_memory and total_tool_calls > 0:
             asyncio.create_task(self._background_memory_review(messages, event.session_key))
 
-        return response_text
+        outbound_sent = False
+        if publish_response:
+            outbound_sent = await stream_publisher.finalize(response_text)
+
+        return _ProcessResult(response_text=response_text or "", outbound_sent=outbound_sent)
+
+    def _should_introduce(self, session: Session) -> bool:
+        if not self.config.session.introduction_enabled:
+            return False
+        return not any(msg.get("role") == "assistant" for msg in session.messages)
+
+    def _build_introduction(self, event: InboundEvent) -> str:
+        template = self.config.session.introduction_template.strip()
+        if not template:
+            if event.channel in {"wechat", "wecom", "weixin"}:
+                template = "你好，我是 {agent_name}，很高兴为你服务。"
+            else:
+                template = "Hello, I'm {agent_name}. How can I help?"
+
+        values = {
+            "agent_name": self.context.agent_name,
+            "channel": event.channel,
+            "chat_id": event.chat_id,
+            "session_key": event.session_key,
+        }
+        try:
+            return template.format(**values).strip()
+        except Exception:
+            logger.warning("Invalid session introduction template, using raw text")
+            return template
+
+    def _should_stream_channel(self, channel: str) -> bool:
+        if channel.startswith("gateway:"):
+            return False
+        return channel in set(self.config.channels.stream_channels)
 
     async def _background_skill_review(self, messages: list[dict[str, Any]]) -> None:
         try:
@@ -388,4 +553,5 @@ class AgentLoop:
             channel="cli", sender_id="user", chat_id="direct", text=content,
             session_key_override=session_key,
         )
-        return await self._process_event(event, uuid.uuid4().hex[:12]) or ""
+        result = await self._process_event(event, uuid.uuid4().hex[:12], publish_response=False)
+        return result.response_text or ""

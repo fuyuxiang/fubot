@@ -163,6 +163,9 @@ class ChannelsConfig(_Base):
     matrix: MatrixChannelConfig = Field(default_factory=MatrixChannelConfig)
     send_progress: bool = False
     send_tool_hints: bool = False
+    stream_channels: list[str] = Field(default_factory=lambda: ["weixin", "qqbot"])
+    stream_flush_chars: int = 48
+    stream_flush_interval_ms: int = 500
     transcription_api_key: str = ""
 
 
@@ -294,6 +297,8 @@ class SessionConfig(_Base):
     expiry_hours: int = 72
     archive_after_hours: int = 168
     context_window_tokens: int = 65536
+    introduction_enabled: bool = True
+    introduction_template: str = ""
 
 
 # ── Memory configs ───────────────────────────────────────────────────────────

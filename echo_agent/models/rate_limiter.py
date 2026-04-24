@@ -6,7 +6,7 @@ import asyncio
 import time
 from typing import Any
 
-from echo_agent.models.provider import LLMProvider, LLMResponse
+from echo_agent.models.provider import LLMProvider, LLMResponse, StreamDeltaCallback
 
 
 class TokenBucketLimiter:
@@ -53,6 +53,18 @@ class RateLimitedProvider(LLMProvider):
     ) -> LLMResponse:
         await self._limiter.acquire()
         return await self._inner.chat(messages, tools, model, tool_choice, **kwargs)
+
+    async def chat_stream(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        model: str | None = None,
+        tool_choice: str | dict | None = None,
+        on_delta: StreamDeltaCallback | None = None,
+        **kwargs: Any,
+    ) -> LLMResponse:
+        await self._limiter.acquire()
+        return await self._inner.chat_stream(messages, tools, model, tool_choice, on_delta=on_delta, **kwargs)
 
     def get_default_model(self) -> str:
         return self._inner.get_default_model()

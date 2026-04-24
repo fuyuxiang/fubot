@@ -441,11 +441,12 @@ class GatewayServer:
         session_key = f"gateway:{platform}:{event.chat_id}"
         payload = self._build_outbound_payload(event)
 
-        if event.reply_to_id:
-            future = self._pending_http.get(event.reply_to_id)
+        correlation_id = str(event.metadata.get("_inbound_event_id") or event.reply_to_id or "")
+        if correlation_id:
+            future = self._pending_http.get(correlation_id)
             if future is not None and not future.done() and event.is_final:
                 future.set_result(payload)
-                self._pending_http.pop(event.reply_to_id, None)
+                self._pending_http.pop(correlation_id, None)
 
         await self.broadcast_to_ws(session_key, payload)
 

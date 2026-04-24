@@ -1,11 +1,16 @@
 # Echo Agent default configuration
 # Override via echo-agent.yaml or ECHO_AGENT_ env vars
 
-workspace: "."
+workspace: "~/.echo-agent"
 
 channels:
   cli:
     enabled: true
+  streamChannels:
+    - "weixin"
+    - "qqbot"
+  streamFlushChars: 48
+  streamFlushIntervalMs: 500
   webhook:
     enabled: false
     host: "0.0.0.0"
@@ -44,6 +49,8 @@ session:
   maxHistoryMessages: 500
   expiryHours: 72
   contextWindowTokens: 65536
+  introductionEnabled: true
+  introductionTemplate: ""
 
 memory:
   enabled: true
