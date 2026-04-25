@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -128,6 +129,7 @@ class ApprovalManager:
         self._default_policy = default_policy
         self._pending: dict[str, ApprovalRequest] = {}
         self._history: list[ApprovalRequest] = []
+        self._approved_signatures: set[str] = set()
 
     def needs_approval(self, action: str) -> bool:
         if action in self._auto_approve:
@@ -139,16 +141,35 @@ class ApprovalManager:
         return self._default_policy == "ask"
 
     def request_approval(self, action: str, tool_name: str = "", params: dict[str, Any] | None = None, user_id: str = "") -> ApprovalRequest:
+        params = params or {}
+        signature = self._signature(action, tool_name, params, user_id)
+        if signature in self._approved_signatures:
+            self._approved_signatures.remove(signature)
+            req = ApprovalRequest(action=action, tool_name=tool_name, params=params, user_id=user_id, status=ApprovalStatus.APPROVED, reason="approved by prior request")
+            self._history.append(req)
+            return req
         if action in self._auto_approve:
-            req = ApprovalRequest(action=action, tool_name=tool_name, params=params or {}, user_id=user_id, status=ApprovalStatus.APPROVED)
+            req = ApprovalRequest(action=action, tool_name=tool_name, params=params, user_id=user_id, status=ApprovalStatus.APPROVED)
             self._history.append(req)
             return req
         if action in self._auto_deny:
-            req = ApprovalRequest(action=action, tool_name=tool_name, params=params or {}, user_id=user_id, status=ApprovalStatus.DENIED, reason="auto-denied by policy")
+            req = ApprovalRequest(action=action, tool_name=tool_name, params=params, user_id=user_id, status=ApprovalStatus.DENIED, reason="auto-denied by policy")
+            self._history.append(req)
+            return req
+        if action in self._require:
+            req = ApprovalRequest(action=action, tool_name=tool_name, params=params, user_id=user_id)
+            self._pending[req.id] = req
+            return req
+        if self._default_policy == "approve":
+            req = ApprovalRequest(action=action, tool_name=tool_name, params=params, user_id=user_id, status=ApprovalStatus.APPROVED)
+            self._history.append(req)
+            return req
+        if self._default_policy == "deny":
+            req = ApprovalRequest(action=action, tool_name=tool_name, params=params, user_id=user_id, status=ApprovalStatus.DENIED, reason="denied by default policy")
             self._history.append(req)
             return req
 
-        req = ApprovalRequest(action=action, tool_name=tool_name, params=params or {}, user_id=user_id)
+        req = ApprovalRequest(action=action, tool_name=tool_name, params=params, user_id=user_id)
         self._pending[req.id] = req
         return req
 
@@ -159,6 +180,7 @@ class ApprovalManager:
         req.status = ApprovalStatus.APPROVED
         req.decided_by = decided_by
         req.decided_at = datetime.now().isoformat()
+        self._approved_signatures.add(self._signature(req.action, req.tool_name, req.params, req.user_id))
         self._history.append(req)
         return True
 
@@ -176,6 +198,13 @@ class ApprovalManager:
     def get_pending(self) -> list[ApprovalRequest]:
         return list(self._pending.values())
 
+    def get(self, request_id: str) -> ApprovalRequest | None:
+        return self._pending.get(request_id)
+
+    def _signature(self, action: str, tool_name: str, params: dict[str, Any], user_id: str) -> str:
+        payload = json.dumps(params, ensure_ascii=False, sort_keys=True, default=str)
+        return hashlib.sha256(f"{user_id}:{action}:{tool_name}:{payload}".encode()).hexdigest()
+
 
 @dataclass
 class Credential:
@@ -191,11 +220,56 @@ class Credential:
 class CredentialManager:
     """Manages agent credentials with isolation per tool and rotation support."""
 
-    def __init__(self, store_path: Path):
+    def __init__(
+        self,
+        store_path: Path,
+        encryption_key_env: str = "ECHO_AGENT_CREDENTIAL_KEY",
+        require_encryption: bool = False,
+    ):
         self._store_path = store_path
+        self._encryption_key_env = encryption_key_env
+        self._require_encryption = require_encryption
         self._credentials: dict[str, Credential] = {}
         self._audit: list[dict[str, Any]] = []
         self._load()
+
+    def _fernet(self) -> Any | None:
+        secret = os.environ.get(self._encryption_key_env, "")
+        if not secret:
+            if self._require_encryption:
+                raise RuntimeError(
+                    f"Credential encryption required but {self._encryption_key_env} is not set"
+                )
+            return None
+        try:
+            import base64
+            from cryptography.fernet import Fernet
+        except ImportError as exc:
+            raise RuntimeError("cryptography is required for encrypted credential storage") from exc
+        key = base64.urlsafe_b64encode(hashlib.sha256(secret.encode()).digest())
+        return Fernet(key)
+
+    def _encode_secret(self, value: str) -> tuple[str, str]:
+        fernet = self._fernet()
+        if not fernet:
+            logger.warning(
+                "Credential encryption key not configured; storing credential metadata with plaintext fallback"
+            )
+            return "plain", value
+        return "fernet", fernet.encrypt(value.encode()).decode()
+
+    def _decode_secret(self, item: dict[str, Any]) -> str:
+        encoding = item.get("encoding", "plain")
+        if encoding == "plain":
+            return item.get("_value", "")
+        if encoding == "fernet":
+            fernet = self._fernet()
+            if not fernet:
+                raise RuntimeError(
+                    f"Credential file is encrypted but {self._encryption_key_env} is not set"
+                )
+            return fernet.decrypt(item.get("value_enc", "").encode()).decode()
+        raise RuntimeError(f"Unsupported credential encoding: {encoding}")
 
     def _load(self) -> None:
         if not self._store_path.exists():
@@ -203,13 +277,14 @@ class CredentialManager:
         try:
             data = json.loads(self._store_path.read_text(encoding="utf-8"))
             for item in data.get("credentials", []):
+                value = self._decode_secret(item)
                 cred = Credential(
                     id=item["id"], name=item["name"],
                     tool_scope=item.get("tool_scope", "*"),
                     value_hash=item.get("value_hash", ""),
                     created_at=item.get("created_at", ""),
                     rotated_at=item.get("rotated_at", ""),
-                    _value=item.get("_value", ""),
+                    _value=value,
                 )
                 self._credentials[cred.id] = cred
         except Exception as e:
@@ -217,15 +292,27 @@ class CredentialManager:
 
     def _save(self) -> None:
         self._store_path.parent.mkdir(parents=True, exist_ok=True)
+        items: list[dict[str, Any]] = []
+        for c in self._credentials.values():
+            encoding, encoded = self._encode_secret(c._value)
+            item = {
+                "id": c.id,
+                "name": c.name,
+                "tool_scope": c.tool_scope,
+                "value_hash": c.value_hash,
+                "created_at": c.created_at,
+                "rotated_at": c.rotated_at,
+                "encoding": encoding,
+            }
+            if encoding == "fernet":
+                item["value_enc"] = encoded
+            else:
+                item["_value"] = encoded
+            items.append(item)
         data = {
-            "credentials": [
-                {
-                    "id": c.id, "name": c.name, "tool_scope": c.tool_scope,
-                    "value_hash": c.value_hash, "created_at": c.created_at,
-                    "rotated_at": c.rotated_at, "_value": c._value,
-                }
-                for c in self._credentials.values()
-            ]
+            "format": "echo-agent-credentials-v2",
+            "encryption_key_env": self._encryption_key_env,
+            "credentials": items,
         }
         self._store_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 

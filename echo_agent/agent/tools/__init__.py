@@ -10,7 +10,6 @@ from loguru import logger
 from echo_agent.agent.tools.base import Tool
 from echo_agent.agent.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
 from echo_agent.agent.tools.message import MessageTool
-from echo_agent.agent.tools.shell import ShellTool
 from echo_agent.agent.tools.web import WebFetchTool, WebSearchTool
 from echo_agent.bus.queue import MessageBus
 from echo_agent.config.schema import Config
@@ -28,24 +27,38 @@ def discover_tools(
     memory_store: Any = None,
     task_manager: Any = None,
     workflow_engine: Any = None,
+    knowledge_index: Any = None,
 ) -> list[Tool]:
     ws = str(workspace)
     restrict = config.tools.restrict_to_workspace
     tools: list[Tool] = []
+    executor = None
 
-    tools.append(ShellTool(
-        ws,
-        allowed=config.tools.exec.allowed_commands,
-        blocked=config.tools.exec.blocked_commands,
-        max_output=config.tools.exec.max_output_chars,
-    ))
+    if config.tools.exec.enabled:
+        from echo_agent.agent.executors.factory import create_executor
+        from echo_agent.agent.tools.shell import ShellTool
+        executor = create_executor(config.execution, workspace)
+        tools.append(ShellTool(
+            ws,
+            allowed=config.tools.exec.allowed_commands,
+            blocked=config.tools.exec.blocked_commands,
+            max_output=config.tools.exec.max_output_chars,
+            executor=executor,
+        ))
     tools.append(ReadFileTool(ws, restrict))
     tools.append(WriteFileTool(ws, restrict))
     tools.append(EditFileTool(ws, restrict))
     tools.append(ListDirTool(ws, restrict))
-    tools.append(WebFetchTool(proxy=config.tools.web.proxy))
-    if config.tools.web.search_api_key:
-        tools.append(WebSearchTool(api_key=config.tools.web.search_api_key, proxy=config.tools.web.proxy))
+    if config.tools.web.enabled:
+        tools.append(WebFetchTool(proxy=config.tools.web.proxy))
+        if config.tools.web.search_api_key or config.tools.web.search_provider == "searxng":
+            tools.append(WebSearchTool(
+                api_key=config.tools.web.search_api_key,
+                provider=config.tools.web.search_provider,
+                api_base=config.tools.web.search_api_base,
+                proxy=config.tools.web.proxy,
+                timeout_seconds=config.tools.web.timeout_seconds,
+            ))
     tools.append(MessageTool(publish_fn=bus.publish_outbound))
 
     from echo_agent.agent.tools.search import SearchFilesTool
@@ -73,7 +86,13 @@ def discover_tools(
 
     if config.tools.exec.enabled:
         from echo_agent.agent.tools.code_exec import CodeExecTool
-        tools.append(CodeExecTool(ws))
+        tools.append(CodeExecTool(
+            ws,
+            executor=executor,
+            allowed_languages=config.tools.code_exec.allowed_languages,
+            max_output=config.tools.exec.max_output_chars,
+            timeout_seconds=config.tools.code_exec.timeout_seconds,
+        ))
 
         from echo_agent.agent.tools.process import ProcessTool
         tools.append(ProcessTool(ws))
@@ -108,6 +127,11 @@ def discover_tools(
     if memory_store:
         from echo_agent.agent.tools.memory import MemoryTool
         tools.append(MemoryTool(store=memory_store))
+
+    if knowledge_index:
+        from echo_agent.agent.tools.knowledge import KnowledgeIndexTool, KnowledgeSearchTool
+        tools.append(KnowledgeSearchTool(index=knowledge_index, default_limit=config.knowledge.max_results))
+        tools.append(KnowledgeIndexTool(index=knowledge_index))
 
     logger.info("Discovered {} tools", len(tools))
     return tools

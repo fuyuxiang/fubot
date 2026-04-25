@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import shlex
 import uuid
+from pathlib import Path
 from typing import Any
 
 from loguru import logger
@@ -16,19 +18,24 @@ class ContainerExecutor(BaseExecutor):
 
     name = "container"
 
-    def __init__(self, image: str = "", network_policy: str = "restricted"):
+    def __init__(self, image: str = "", network_policy: str = "restricted", workspace: str = ""):
         self._image = image
         self._network_policy = network_policy
+        self._workspace = Path(workspace).resolve() if workspace else None
         self._container_id: str | None = None
 
     async def setup(self) -> None:
         if not self._image:
             raise ValueError("Container image not configured")
         try:
+            mount_args: list[str] = []
+            if self._workspace:
+                mount_args = ["-v", f"{self._workspace}:/workspace", "-w", "/workspace"]
             proc = await asyncio.create_subprocess_exec(
                 "docker", "create", "--rm",
                 "--network", "none" if self._network_policy == "deny" else "bridge",
                 "--name", f"echo-agent-{uuid.uuid4().hex[:8]}",
+                *mount_args,
                 self._image, "sleep", "infinity",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
@@ -59,9 +66,13 @@ class ContainerExecutor(BaseExecutor):
         for k, v in merged_env.items():
             env_args.extend(["-e", f"{k}={v}"])
 
-        cmd = ["docker", "exec"] + env_args
-        if request.cwd:
-            cmd.extend(["-w", request.cwd])
+        cmd = ["docker", "exec"]
+        if request.stdin:
+            cmd.append("-i")
+        cmd += env_args
+        cwd = self._container_cwd(request.cwd)
+        if cwd:
+            cmd.extend(["-w", cwd])
         cmd.extend([self._container_id, "sh", "-c", request.command])
 
         try:
@@ -69,8 +80,12 @@ class ContainerExecutor(BaseExecutor):
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                stdin=asyncio.subprocess.PIPE if request.stdin else None,
             )
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=request.timeout)
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(request.stdin.encode() if request.stdin else None),
+                timeout=request.timeout,
+            )
             return ExecResponse(
                 success=proc.returncode == 0,
                 stdout=stdout.decode(errors="replace"),
@@ -83,16 +98,36 @@ class ContainerExecutor(BaseExecutor):
         except Exception as e:
             return ExecResponse(success=False, stderr=str(e), return_code=-1, executor=self.name)
 
+    def _container_cwd(self, cwd: str) -> str:
+        if not self._workspace:
+            return cwd
+        if not cwd:
+            return "/workspace"
+        try:
+            rel = Path(cwd).resolve().relative_to(self._workspace)
+            return str(Path("/workspace") / rel)
+        except ValueError:
+            return "/workspace"
+
 
 class RemoteExecutor(BaseExecutor):
-    """Execute commands on a remote host via SSH."""
+    """Execute commands on a remote host via SSH with proper input sanitization."""
 
     name = "remote"
 
-    def __init__(self, host: str = "", user: str = "root", key_path: str = ""):
+    def __init__(
+        self,
+        host: str = "",
+        user: str = "root",
+        key_path: str = "",
+        strict_host_key: str = "accept-new",
+        connect_timeout: int = 10,
+    ):
         self._host = host
         self._user = user
         self._key_path = key_path
+        self._strict_host_key = strict_host_key
+        self._connect_timeout = connect_timeout
 
     async def setup(self) -> None:
         if not self._host:
@@ -101,25 +136,46 @@ class RemoteExecutor(BaseExecutor):
     async def teardown(self) -> None:
         pass
 
-    async def execute(self, request: ExecRequest) -> ExecResponse:
-        ssh_cmd = ["ssh", "-o", "StrictHostKeyChecking=no"]
+    def _build_ssh_base(self) -> list[str]:
+        cmd = [
+            "ssh",
+            "-o", f"StrictHostKeyChecking={self._strict_host_key}",
+            "-o", f"ConnectTimeout={self._connect_timeout}",
+        ]
         if self._key_path:
-            ssh_cmd.extend(["-i", self._key_path])
-        ssh_cmd.append(f"{self._user}@{self._host}")
+            cmd.extend(["-i", self._key_path])
+        cmd.append(f"{self._user}@{self._host}")
+        return cmd
 
-        env_prefix = " ".join(f"{k}={v}" for k, v in request.env.items())
-        full_cmd = f"{env_prefix} {request.command}" if env_prefix else request.command
+    def _build_remote_command(self, request: ExecRequest) -> str:
+        merged_env = self.inject_credentials({}, request.credentials)
+        merged_env.update(request.env)
+
+        env_prefix = " ".join(
+            f"{shlex.quote(k)}={shlex.quote(v)}" for k, v in merged_env.items()
+        )
+        safe_cmd = request.command
+        if env_prefix:
+            safe_cmd = f"{env_prefix} {safe_cmd}"
         if request.cwd:
-            full_cmd = f"cd {request.cwd} && {full_cmd}"
-        ssh_cmd.append(full_cmd)
+            safe_cmd = f"cd {shlex.quote(request.cwd)} && {safe_cmd}"
+        return safe_cmd
+
+    async def execute(self, request: ExecRequest) -> ExecResponse:
+        ssh_cmd = self._build_ssh_base()
+        ssh_cmd.append(self._build_remote_command(request))
 
         try:
             proc = await asyncio.create_subprocess_exec(
                 *ssh_cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                stdin=asyncio.subprocess.PIPE if request.stdin else None,
             )
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=request.timeout)
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(request.stdin.encode() if request.stdin else None),
+                timeout=request.timeout,
+            )
             return ExecResponse(
                 success=proc.returncode == 0,
                 stdout=stdout.decode(errors="replace"),

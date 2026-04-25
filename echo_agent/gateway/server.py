@@ -45,12 +45,16 @@ class GatewayServer:
         channel_manager: ChannelManager,
         session_manager: SessionManager,
         workspace: Path,
+        agent_loop: Any = None,
+        a2a_config: Any = None,
     ):
         self._config = config
         self._bus = bus
         self.channel_manager = channel_manager
         self.session_manager = session_manager
         self._workspace = workspace
+        self._agent_loop = agent_loop
+        self._a2a_config = a2a_config
 
         self._app: web.Application | None = None
         self._runner: web.AppRunner | None = None
@@ -132,6 +136,7 @@ class GatewayServer:
     # ── Route setup ──────────────────────────────────────────────────────────
 
     def _setup_routes(self) -> None:
+        """注册所有 HTTP 和 WebSocket 路由，包括 A2A 协议端点。"""
         prefix = self._config.api_prefix
         app = self._app
         assert app is not None
@@ -146,12 +151,55 @@ class GatewayServer:
         app.router.add_get(f"{prefix}/stats", self._handle_stats)
         app.router.add_get(self._config.ws_path, self._handle_websocket)
 
+        if self._a2a_config and self._a2a_config.enabled and self._agent_loop:
+            from echo_agent.a2a.server import A2AServer
+            from echo_agent.a2a.models import AgentCard
+            card = AgentCard(
+                name=self._a2a_config.agent_name,
+                description=self._a2a_config.agent_description,
+                url=f"http://{self._config.host}:{self._config.port}",
+            )
+            a2a = A2AServer(self._agent_loop, card)
+            a2a.register_routes(app)
+
     # ── HTTP handlers ────────────────────────────────────────────────────────
 
     PLACEHOLDER_CONTINUE = "<!-- more -->"
 
+    def _request_token(self, request: web.Request) -> str:
+        token = self.auth.token_from_headers(request.headers)
+        if token:
+            return token
+        return request.query.get("token", "").strip()
+
+    def _require_api_token(self, request: web.Request, *, action: str) -> web.Response | None:
+        if not self._config.auth.api_tokens:
+            return None
+        token = self._request_token(request)
+        if self.auth.authenticate_token(token):
+            self.auth.audit(action, ok=True)
+            return None
+        self.auth.audit(action, ok=False, reason="invalid api token")
+        return web.json_response({"error": "unauthorized"}, status=401)
+
     def _playground_path(self) -> Path:
         return Path(__file__).resolve().parent / "static" / "index.html"
+
+    def _authenticate_and_check_rate_limit(
+        self, platform: str, user_id: str, chat_id: str,
+    ) -> str | None:
+        """统一的认证和限流检查。
+
+        Returns:
+            str: 错误信息（如果被拒绝）
+            None: 检查通过
+        """
+        if not self.auth.is_authorized(platform, user_id):
+            self.auth.audit("message", platform=platform, user_id=user_id, ok=False, reason="user unauthorized")
+            return "unauthorized"
+        if not self.rate_limiter.acquire(platform, chat_id):
+            return "rate limited"
+        return None
 
     def _build_outbound_payload(self, event: OutboundEvent) -> dict[str, Any]:
         return {
@@ -174,6 +222,10 @@ class GatewayServer:
         return web.Response(text="Gateway playground not found.", status=404)
 
     async def _handle_message(self, request: web.Request) -> web.Response:
+        """处理 HTTP 消息请求：认证 → 限流 → 会话管理 → 事件分发。"""
+        guard = self._require_api_token(request, action="message")
+        if guard is not None:
+            return guard
         try:
             body = await request.json()
         except json.JSONDecodeError:
@@ -190,12 +242,13 @@ class GatewayServer:
         if not text and not media_urls:
             return web.json_response({"error": "text or media_urls required"}, status=400)
 
-        if not self.auth.is_authorized(platform, user_id):
+        rejection = self._authenticate_and_check_rate_limit(platform, user_id, chat_id)
+        if rejection == "unauthorized":
             await self.hooks.emit("auth_failed", platform=platform, user_id=user_id)
             return web.json_response({"error": "unauthorized"}, status=403)
-
-        if not self.rate_limiter.acquire(platform, chat_id):
+        if rejection == "rate limited":
             return web.json_response({"error": "rate limited"}, status=429)
+        self.auth.audit("message", platform=platform, user_id=user_id, ok=True)
 
         session_key = f"gateway:{platform}:{chat_id}"
         session = await self.session_manager.get_or_create(session_key)
@@ -284,11 +337,17 @@ class GatewayServer:
         return web.json_response(status, status=code)
 
     async def _handle_list_sessions(self, request: web.Request) -> web.Response:
+        guard = self._require_api_token(request, action="list_sessions")
+        if guard is not None:
+            return guard
         sessions = self.session_manager.list_sessions()
         gateway_sessions = [s for s in sessions if s.get("key", "").startswith("gateway:")]
         return web.json_response({"sessions": gateway_sessions})
 
     async def _handle_reset_session(self, request: web.Request) -> web.Response:
+        guard = self._require_api_token(request, action="reset_session")
+        if guard is not None:
+            return guard
         key = request.match_info["key"]
         session = await self.session_manager.get_or_create(key)
         await self.session_policy.reset(session, self.session_manager)
@@ -296,6 +355,9 @@ class GatewayServer:
         return web.json_response({"status": "reset", "session_key": key})
 
     async def _handle_pair_generate(self, request: web.Request) -> web.Response:
+        guard = self._require_api_token(request, action="pair_generate")
+        if guard is not None:
+            return guard
         try:
             body = await request.json()
         except json.JSONDecodeError:
@@ -329,6 +391,9 @@ class GatewayServer:
             return web.json_response({"error": "invalid or expired code"}, status=403)
 
     async def _handle_stats(self, request: web.Request) -> web.Response:
+        guard = self._require_api_token(request, action="stats")
+        if guard is not None:
+            return guard
         health_data = await self.health.check()
         health_data["ws_clients"] = len(self._ws_clients)
         return web.json_response(health_data)
@@ -336,8 +401,9 @@ class GatewayServer:
     # ── WebSocket handler ─────────────────────────────────────────────────
 
     async def _handle_websocket(self, request: web.Request) -> web.WebSocketResponse:
-        ws = web.WebSocketResponse()
-        await ws.prepare(request)
+        """处理 WebSocket 连接：认证握手 → 消息循环 → 事件分发。"""
+        websocket = web.WebSocketResponse()
+        await websocket.prepare(request)
 
         ws_id = None
         platform = "ws"
@@ -346,12 +412,12 @@ class GatewayServer:
         session_key = ""
 
         try:
-            async for raw_msg in ws:
+            async for raw_msg in websocket:
                 if raw_msg.type == aiohttp.WSMsgType.TEXT:
                     try:
                         data = json.loads(raw_msg.data)
                     except json.JSONDecodeError:
-                        await ws.send_json({"error": "invalid JSON"})
+                        await websocket.send_json({"error": "invalid JSON"})
                         continue
 
                     msg_type = data.get("type", "message")
@@ -360,21 +426,30 @@ class GatewayServer:
                         platform = data.get("platform", "ws")
                         user_id = data.get("user_id", "")
                         chat_id = data.get("chat_id", user_id)
+                        token = str(data.get("token") or self._request_token(request))
+
+                        if self._config.auth.api_tokens and not self.auth.authenticate_token(token):
+                            self.auth.audit("ws_auth", platform=platform, user_id=user_id, ok=False, reason="invalid api token")
+                            await websocket.send_json({"type": "error", "error": "unauthorized"})
+                            await websocket.close()
+                            return websocket
 
                         if not self.auth.is_authorized(platform, user_id):
-                            await ws.send_json({"type": "error", "error": "unauthorized"})
-                            await ws.close()
-                            return ws
+                            self.auth.audit("ws_auth", platform=platform, user_id=user_id, ok=False, reason="user unauthorized")
+                            await websocket.send_json({"type": "error", "error": "unauthorized"})
+                            await websocket.close()
+                            return websocket
 
                         session_key = f"gateway:{platform}:{chat_id}"
                         ws_id = session_key
-                        self._ws_clients[ws_id] = ws
+                        self._ws_clients[ws_id] = websocket
 
                         session = await self.session_manager.get_or_create(session_key)
                         if self.session_policy.should_reset(session):
                             await self.session_policy.reset(session, self.session_manager)
 
-                        await ws.send_json({"type": "auth_ok", "session_key": session_key})
+                        await websocket.send_json({"type": "auth_ok", "session_key": session_key})
+                        self.auth.audit("ws_auth", platform=platform, user_id=user_id, ok=True)
                         await self.hooks.emit(
                             "auth_success", platform=platform, user_id=user_id,
                         )
@@ -382,7 +457,7 @@ class GatewayServer:
 
                     if msg_type == "message":
                         if not session_key:
-                            await ws.send_json({"type": "error", "error": "authenticate first"})
+                            await websocket.send_json({"type": "error", "error": "authenticate first"})
                             continue
 
                         text = data.get("text", "")
@@ -390,7 +465,7 @@ class GatewayServer:
                             continue
 
                         if not self.rate_limiter.acquire(platform, chat_id):
-                            await ws.send_json({"type": "error", "error": "rate limited"})
+                            await websocket.send_json({"type": "error", "error": "rate limited"})
                             continue
 
                         tokens = set_session_vars(
@@ -410,7 +485,7 @@ class GatewayServer:
                             event.metadata["gateway"] = True
                             event.metadata["platform"] = platform
                             await self._bus.publish_inbound(event)
-                            await ws.send_json({
+                            await websocket.send_json({
                                 "type": "accepted",
                                 "event_id": event.event_id,
                             })
@@ -418,7 +493,7 @@ class GatewayServer:
                             clear_session_vars(tokens)
 
                     if msg_type == "ping":
-                        await ws.send_json({"type": "pong"})
+                        await websocket.send_json({"type": "pong"})
 
                 elif raw_msg.type in (aiohttp.WSMsgType.ERROR, aiohttp.WSMsgType.CLOSE):
                     break
@@ -429,7 +504,7 @@ class GatewayServer:
             if ws_id and ws_id in self._ws_clients:
                 del self._ws_clients[ws_id]
 
-        return ws
+        return websocket
 
     async def _handle_outbound(self, event: OutboundEvent) -> None:
         if event.metadata.get("_drop"):

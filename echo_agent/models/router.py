@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from enum import Enum
 from typing import Any
 
 from loguru import logger
@@ -23,27 +24,40 @@ class RouteDecision:
     temperature: float = 0.7
 
 
+class HealthStatus(str, Enum):
+    """模型提供商健康状态。"""
+    HEALTHY = "healthy"
+    DEGRADED = "degraded"
+    COOLDOWN = "cooldown"
+    DISABLED = "disabled"
+
+
 @dataclass
 class ProviderHealth:
-    status: str = "healthy"  # healthy | degraded | cooldown | disabled
+    status: HealthStatus = HealthStatus.HEALTHY
     failure_count: int = 0
     last_error: str = ""
     cooldown_until: datetime | None = None
 
     @property
     def is_available(self) -> bool:
-        if self.status == "disabled":
+        if self.status == HealthStatus.DISABLED:
             return False
-        if self.status == "cooldown" and self.cooldown_until:
+        if self.status == HealthStatus.COOLDOWN and self.cooldown_until:
             if datetime.now(timezone.utc) < self.cooldown_until:
                 return False
-            self.status = "healthy"
+            self.status = HealthStatus.HEALTHY
             self.failure_count = 0
         return True
 
     @property
     def score(self) -> float:
-        scores = {"healthy": 1.0, "degraded": 0.5, "cooldown": 0.0, "disabled": -1.0}
+        scores = {
+            HealthStatus.HEALTHY: 1.0,
+            HealthStatus.DEGRADED: 0.5,
+            HealthStatus.COOLDOWN: 0.0,
+            HealthStatus.DISABLED: -1.0,
+        }
         return scores.get(self.status, 0.0)
 
 
@@ -81,22 +95,80 @@ class ModelRouter:
         )
 
     def route_with_fallback(self, task_type: str = "", content: str = "") -> tuple[LLMProvider, RouteDecision]:
-        decision = self.route(task_type, content)
-        provider = self._find_healthy_provider(decision.model)
-        if provider:
+        candidates = self.route_candidates(task_type, content)
+        if candidates:
+            _, provider, decision = candidates[0]
             return provider, decision
-
-        for fallback_model in decision.fallback_chain:
-            provider = self._find_healthy_provider(fallback_model)
-            if provider:
-                decision.model = fallback_model
-                decision.reason = f"fallback from {decision.model}"
-                return provider, decision
-
-        first_provider = next(iter(self._providers.values()), None)
-        if first_provider:
-            return first_provider, decision
         raise RuntimeError("No LLM providers available")
+
+    def route_provider_with_fallback(
+        self,
+        task_type: str = "",
+        content: str = "",
+        preferred_model: str = "",
+    ) -> tuple[str, LLMProvider, RouteDecision]:
+        candidates = self.route_candidates(task_type, content, preferred_model=preferred_model)
+        if not candidates:
+            raise RuntimeError("No LLM providers available")
+        return candidates[0]
+
+    def route_candidates(
+        self,
+        task_type: str = "",
+        content: str = "",
+        preferred_model: str = "",
+    ) -> list[tuple[str, LLMProvider, RouteDecision]]:
+        """构建模型降级链：优先模型 → 任务路由 → 默认模型 → 可用备选。
+
+        按健康状态和配置优先级排序，返回 (提供商, 路由决策) 列表。
+        """
+        base = self.route(task_type, content, preferred_model=preferred_model)
+        model_chain: list[str] = []
+        for model in [base.model, *base.fallback_chain, self._config.fallback_model]:
+            if model and model not in model_chain:
+                model_chain.append(model)
+
+        candidates: list[tuple[str, LLMProvider, RouteDecision]] = []
+        seen: set[tuple[str, str]] = set()
+        for index, model in enumerate(model_chain):
+            preferred_provider = base.provider_name if index == 0 else ""
+            entry = self._find_healthy_provider_entry(model, preferred_provider=preferred_provider)
+            if not entry:
+                continue
+            provider_name, provider = entry
+            key = (provider_name, model)
+            if key in seen:
+                continue
+            seen.add(key)
+            decision = RouteDecision(
+                provider_name=provider_name,
+                model=model,
+                fallback_chain=model_chain[index + 1:],
+                reason=base.reason if index == 0 else f"fallback after {base.model}",
+                context_window=base.context_window,
+                max_tokens=base.max_tokens,
+                temperature=base.temperature,
+            )
+            candidates.append((provider_name, provider, decision))
+
+        for provider_name, provider in self._providers.items():
+            if not self._provider_available(provider_name):
+                continue
+            default_model = provider.get_default_model() if hasattr(provider, "get_default_model") else ""
+            key = (provider_name, default_model)
+            if key in seen:
+                continue
+            seen.add(key)
+            candidates.append((provider_name, provider, RouteDecision(
+                provider_name=provider_name,
+                model=default_model or base.model,
+                fallback_chain=[],
+                reason="available provider fallback",
+                max_tokens=base.max_tokens,
+                temperature=base.temperature,
+                context_window=base.context_window,
+            )))
+        return candidates
 
     def mark_failure(self, provider_name: str, error: str = "") -> None:
         health = self._health.get(provider_name)
@@ -106,17 +178,17 @@ class ModelRouter:
         health.failure_count += 1
         health.last_error = error
         if health.failure_count >= 3:
-            health.status = "cooldown"
+            health.status = HealthStatus.COOLDOWN
             health.cooldown_until = datetime.now(timezone.utc) + timedelta(seconds=self._cooldown_seconds)
             logger.warning("Provider {} -> cooldown (failures={})", provider_name, health.failure_count)
         else:
-            health.status = "degraded"
+            health.status = HealthStatus.DEGRADED
             logger.info("Provider {} -> degraded (failures={})", provider_name, health.failure_count)
 
     def mark_success(self, provider_name: str) -> None:
         health = self._health.get(provider_name)
-        if health and health.status != "healthy":
-            health.status = "healthy"
+        if health and health.status != HealthStatus.HEALTHY:
+            health.status = HealthStatus.HEALTHY
             health.failure_count = 0
             health.cooldown_until = None
             logger.info("Provider {} -> healthy", provider_name)
@@ -158,6 +230,8 @@ class ModelRouter:
     def _matches_task(self, route: ModelRouteConfig, task_type: str) -> bool:
         if not task_type:
             return False
+        if route.task_types and task_type.lower() in {item.lower() for item in route.task_types}:
+            return True
         if not route.provider:
             return False
         provider_lower = route.provider.lower()
@@ -169,14 +243,45 @@ class ModelRouter:
         return False
 
     def _find_healthy_provider(self, model: str) -> LLMProvider | None:
-        for name, provider in self._providers.items():
-            health = self._health.get(name)
-            if health and not health.is_available:
+        entry = self._find_healthy_provider_entry(model)
+        return entry[1] if entry else None
+
+    def _find_healthy_provider_entry(
+        self,
+        model: str,
+        *,
+        preferred_provider: str = "",
+    ) -> tuple[str, LLMProvider] | None:
+        if preferred_provider and preferred_provider in self._providers and self._provider_available(preferred_provider):
+            return preferred_provider, self._providers[preferred_provider]
+        for pc in self._config.providers:
+            if not pc.name or pc.name not in self._providers or not self._provider_available(pc.name):
                 continue
-            if hasattr(provider, "get_default_model"):
-                default = provider.get_default_model()
-                if model and default and model.lower().startswith(default.split("/")[0].lower()):
-                    return provider
-            if hasattr(provider, "api_base") or hasattr(provider, "api_key"):
-                return provider
-        return next(iter(self._providers.values()), None)
+            if self._provider_config_supports_model(pc.name, model):
+                return pc.name, self._providers[pc.name]
+        for name, provider in self._providers.items():
+            if not self._provider_available(name):
+                continue
+            default = provider.get_default_model() if hasattr(provider, "get_default_model") else ""
+            if not model or not default or model == default or model.lower().startswith(default.split("/")[0].lower()):
+                return name, provider
+        if not model:
+            for name, provider in self._providers.items():
+                if self._provider_available(name):
+                    return name, provider
+        return None
+
+    def _provider_available(self, provider_name: str) -> bool:
+        health = self._health.get(provider_name)
+        return health.is_available if health else provider_name in self._providers
+
+    def _provider_config_supports_model(self, provider_name: str, model: str) -> bool:
+        for pc in self._config.providers:
+            if pc.name != provider_name:
+                continue
+            if not model:
+                return True
+            if not pc.models:
+                return True
+            return model in pc.models
+        return False

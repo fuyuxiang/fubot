@@ -24,6 +24,7 @@ dependencies = [
     "pyyaml>=6.0",
     "loguru>=0.7",
     "aiohttp>=3.9",
+    "aiosqlite>=0.20",
     "croniter>=1.4",
     "numpy>=1.24",
 ]
@@ -39,8 +40,10 @@ container = ["docker>=7.0"]
 vision = ["pillow>=10.0"]
 process = ["psutil>=5.9"]
 weixin = ["cryptography>=41.0"]
-all = ["openai>=1.30", "anthropic>=0.40", "boto3>=1.34", "google-generativeai>=0.8", "pillow>=10.0", "psutil>=5.9", "faiss-cpu>=1.7", "cryptography>=41.0"]
-dev = ["ruff>=0.4"]
+otel = ["opentelemetry-api>=1.20", "opentelemetry-sdk>=1.20", "opentelemetry-exporter-otlp>=1.20"]
+tokenizers = ["tiktoken>=0.7"]
+all = ["openai>=1.30", "anthropic>=0.40", "boto3>=1.34", "google-generativeai>=0.8", "pillow>=10.0", "psutil>=5.9", "faiss-cpu>=1.7", "cryptography>=41.0", "tiktoken>=0.7"]
+dev = ["ruff>=0.4", "pytest>=8.0", "pytest-asyncio>=0.23"]
 
 [project.scripts]
 echo-agent = "echo_agent.__main__:main"

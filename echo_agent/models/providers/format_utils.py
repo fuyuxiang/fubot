@@ -129,7 +129,10 @@ def _inject_cache_control(
             content[-1]["cache_control"] = {"type": "ephemeral"}
 
 
-def openai_to_anthropic_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def openai_to_anthropic_tools(
+    tools: list[dict[str, Any]],
+    inject_cache_markers: bool = False,
+) -> list[dict[str, Any]]:
     result = []
     for tool in tools:
         fn = tool.get("function", tool)
@@ -138,6 +141,8 @@ def openai_to_anthropic_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any
             "description": fn.get("description", ""),
             "input_schema": fn.get("parameters", {"type": "object", "properties": {}}),
         })
+    if inject_cache_markers and result:
+        result[-1]["cache_control"] = {"type": "ephemeral"}
     return result
 
 

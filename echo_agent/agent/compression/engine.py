@@ -21,6 +21,10 @@ class ContextEngine(ABC):
         self.trigger_ratio = trigger_ratio
         self._stats = CompressionStats()
         self._session_key: str | None = None
+        self._token_counter = None
+
+    def set_token_counter(self, counter) -> None:
+        self._token_counter = counter
 
     def should_compress(self, messages: list[dict[str, Any]]) -> bool:
         threshold = int(self.context_window_tokens * self.trigger_ratio)
@@ -41,6 +45,17 @@ class ContextEngine(ABC):
         return total
 
     def _estimate_message_tokens(self, msg: dict[str, Any]) -> int:
+        if self._token_counter:
+            content = msg.get("content", "")
+            if isinstance(content, str):
+                return self._token_counter.count(content) + 4
+            elif isinstance(content, list):
+                total = 4
+                for block in content:
+                    if isinstance(block, dict):
+                        total += self._token_counter.count(block.get("text", ""))
+                return total
+
         tokens = 4  # role + framing overhead
         content = msg.get("content", "")
         if isinstance(content, str):

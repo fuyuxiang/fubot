@@ -35,6 +35,10 @@ tools:
     timeoutSeconds: 30
   web:
     enabled: true
+    searchProvider: "brave"
+    searchApiBase: ""
+    searchApiKey: ""
+  mcpSecurityPolicy: "block"
 
 execution:
   defaultExecutor: "local"
@@ -43,7 +47,19 @@ execution:
 permissions:
   adminUsers: []
   approval:
-    defaultPolicy: "ask"
+    requireApproval:
+      - "exec"
+      - "execute_code"
+      - "write_file"
+      - "edit_file"
+      - "patch"
+      - "process"
+      - "knowledge_index"
+    defaultPolicy: "approve"
+
+credentials:
+  encryptionKeyEnv: "ECHO_AGENT_CREDENTIAL_KEY"
+  requireEncryption: false
 
 session:
   maxHistoryMessages: 500
@@ -56,6 +72,76 @@ memory:
   enabled: true
   consolidationThreshold: 50
   vectorEnabled: false
+
+knowledge:
+  enabled: false
+  docsDir: "data/knowledge"
+  indexPath: "data/knowledge_index.json"
+  autoIndex: true
+  chunkSize: 1200
+  chunkOverlap: 120
+  maxResults: 5
+  requireCitations: true
+
+multiAgent:
+  enabled: false
+  mode: "auto"
+  defaultAgent: "general"
+  routeThreshold: 0.45
+  multiThreshold: 0.62
+  maxParallelAgents: 3
+  maxIterations: 8
+  synthesizeResults: true
+  auditPath: "data/multi_agent_dispatch.jsonl"
+  agents:
+    - id: "general"
+      name: "General Assistant"
+      description: "General conversation, lightweight reasoning, and fallback handling."
+      capabilities: ["general", "chat", "reasoning"]
+      keywords: []
+      taskTypes: ["chat"]
+      toolsAllow: ["read_file", "list_dir", "search_files", "memory", "knowledge_search", "message"]
+      priority: 0
+    - id: "planner"
+      name: "Planning Agent"
+      description: "Breaks ambiguous goals into structured plans, milestones, risks, and execution steps."
+      capabilities: ["planning", "architecture", "decomposition", "strategy"]
+      keywords: ["plan", "planning", "architecture", "roadmap", "方案", "规划", "架构", "拆解", "设计"]
+      taskTypes: ["planning"]
+      toolsAllow: ["read_file", "list_dir", "search_files", "knowledge_search", "memory", "todo"]
+      priority: 20
+    - id: "coder"
+      name: "Coding Agent"
+      description: "Inspects code, implements changes, runs code-oriented tools, and explains technical tradeoffs."
+      capabilities: ["code", "debugging", "refactor", "implementation", "tests"]
+      keywords: ["code", "bug", "test", "pytest", "python", "typescript", "代码", "报错", "测试", "实现", "修复"]
+      taskTypes: ["code"]
+      toolsAllow: ["read_file", "write_file", "edit_file", "list_dir", "search_files", "patch", "exec", "execute_code", "process", "todo", "memory"]
+      priority: 30
+    - id: "researcher"
+      name: "Research Agent"
+      description: "Searches web and local sources, compares evidence, and returns cited findings."
+      capabilities: ["research", "web", "source_analysis", "comparison"]
+      keywords: ["search", "latest", "compare", "news", "调研", "搜索", "最新", "比较", "资料", "来源"]
+      taskTypes: ["research"]
+      toolsAllow: ["web_search", "web_fetch", "knowledge_search", "read_file", "search_files", "memory"]
+      priority: 25
+    - id: "knowledge"
+      name: "Knowledge Agent"
+      description: "Answers from internal knowledge, memory, local files, and indexed documents with citations."
+      capabilities: ["knowledge", "rag", "memory", "docs", "qa"]
+      keywords: ["knowledge", "docs", "document", "policy", "内部知识", "知识库", "文档", "制度", "资料"]
+      taskTypes: ["knowledge", "research"]
+      toolsAllow: ["knowledge_search", "memory", "read_file", "search_files", "list_dir"]
+      priority: 22
+    - id: "operator"
+      name: "Operations Agent"
+      description: "Runs operational commands, diagnostics, scheduled jobs, and system checks with approvals."
+      capabilities: ["operations", "shell", "diagnostics", "automation"]
+      keywords: ["run", "execute", "deploy", "status", "health", "运行", "执行", "部署", "诊断", "状态"]
+      taskTypes: ["operations", "code"]
+      toolsAllow: ["exec", "execute_code", "process", "read_file", "list_dir", "search_files", "cronjob", "task", "workflow"]
+      priority: 18
 
 compression:
   enabled: true
@@ -84,6 +170,9 @@ gateway:
   auth:
     mode: "allowlist"
     allowedUsers: []
+    adminUsers: []
+    apiTokens: []
+    tokenHeader: "X-Echo-Agent-Token"
     pairingTtlSeconds: 300
   platforms: {}
   mediaCacheDir: "data/media_cache"

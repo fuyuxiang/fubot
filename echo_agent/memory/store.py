@@ -15,19 +15,18 @@ using built-in safety properties:
 from __future__ import annotations
 
 import json
-import math
 import os
 import re
 import tempfile
-import uuid
 from contextlib import contextmanager
-from dataclasses import dataclass, field
 from datetime import datetime
-from enum import Enum
 from pathlib import Path
 from typing import Any, Iterable
 
 from loguru import logger
+
+from echo_agent.memory.types import MemoryEntry, MemoryTier, MemoryType, Episode, Contradiction
+from echo_agent.memory.forgetting import ForgettingCurve
 
 msvcrt = None
 try:
@@ -118,72 +117,6 @@ def _atomic_write_text(path: Path, content: str) -> None:
         raise
 
 
-class MemoryType(str, Enum):
-    USER = "user"
-    ENVIRONMENT = "environment"
-
-
-@dataclass
-class MemoryEntry:
-    id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
-    type: MemoryType = MemoryType.USER
-    key: str = ""
-    content: str = ""
-    tags: list[str] = field(default_factory=list)
-    source_session: str = ""
-    created_at: str = field(default_factory=lambda: datetime.now().isoformat())
-    updated_at: str = field(default_factory=lambda: datetime.now().isoformat())
-    importance: float = 0.5
-    access_count: int = 0
-    last_accessed: str = ""
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "id": self.id,
-            "type": self.type.value,
-            "key": self.key,
-            "content": self.content,
-            "tags": self.tags,
-            "source_session": self.source_session,
-            "created_at": self.created_at,
-            "updated_at": self.updated_at,
-            "importance": self.importance,
-            "access_count": self.access_count,
-            "last_accessed": self.last_accessed,
-        }
-
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> MemoryEntry:
-        return cls(
-            id=data.get("id", uuid.uuid4().hex[:12]),
-            type=MemoryType(data.get("type", "user")),
-            key=data.get("key", ""),
-            content=data.get("content", ""),
-            tags=_normalize_tags(data.get("tags", [])),
-            source_session=data.get("source_session", ""),
-            created_at=data.get("created_at", ""),
-            updated_at=data.get("updated_at", ""),
-            importance=data.get("importance", 0.5),
-            access_count=data.get("access_count", 0),
-            last_accessed=data.get("last_accessed", ""),
-        )
-
-    def effective_importance(self, decay_half_life_days: float = 30.0) -> float:
-        if not self.last_accessed or decay_half_life_days <= 0:
-            return self.importance
-        try:
-            last = datetime.fromisoformat(self.last_accessed)
-            days = (datetime.now() - last).total_seconds() / 86400
-            decay = math.pow(0.5, days / decay_half_life_days)
-            return self.importance * decay
-        except (ValueError, OverflowError):
-            return self.importance
-
-    def touch(self) -> None:
-        self.access_count += 1
-        self.last_accessed = datetime.now().isoformat()
-
-
 class MemoryStore:
     """Persistent memory store with file-based storage, safety checks, and scored search."""
 
@@ -211,10 +144,32 @@ class MemoryStore:
         self._entries: dict[str, MemoryEntry] = {}
         self._storage = storage
         self._load()
+        self._forgetting = ForgettingCurve(
+            base_half_life_days=decay_half_life_days,
+            archive_threshold=0.05,
+            forget_threshold=0.01,
+        )
+        self._vector_index = None  # set externally via set_vector_index()
+        self._graph = None  # set externally via set_graph()
+        self._retriever = None  # set externally via set_retriever()
+
+    def set_vector_index(self, index):
+        self._vector_index = index
+
+    def set_graph(self, graph):
+        self._graph = graph
+
+    def set_retriever(self, retriever):
+        self._retriever = retriever
+
+    @property
+    def forgetting_curve(self) -> ForgettingCurve:
+        return self._forgetting
 
     @staticmethod
     @contextmanager
     def _file_lock(path: Path):
+        """跨平台文件锁（Unix 用 fcntl，Windows 用 msvcrt）。"""
         lock_path = path.with_suffix(path.suffix + ".lock")
         lock_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -249,6 +204,17 @@ class MemoryStore:
 
     def _typed_entries(self, mem_type: MemoryType) -> list[MemoryEntry]:
         return [entry for entry in self._entries.values() if entry.type == mem_type]
+
+    def _filtered_entries(
+        self, mem_type: MemoryType | None = None, session_key: str | None = None,
+    ) -> list[MemoryEntry]:
+        """按类型和会话可见性过滤记忆条目。"""
+        entries = list(self._entries.values())
+        if mem_type is not None:
+            entries = [entry for entry in entries if entry.type == mem_type]
+        if session_key:
+            entries = [entry for entry in entries if self._visible_in_session(entry, session_key)]
+        return entries
 
     def _visible_in_session(self, entry: MemoryEntry, session_key: str | None = None) -> bool:
         if not session_key:
@@ -298,6 +264,7 @@ class MemoryStore:
             self._entries[entry.id] = entry
 
     def _save_type(self, mem_type: MemoryType) -> None:
+        """将指定类型的记忆条目原子写入磁盘。"""
         entries = self._typed_entries(mem_type)
         entries.sort(key=lambda entry: (entry.created_at or "", entry.updated_at or "", entry.id))
         payload = [entry.to_dict() for entry in entries]
@@ -337,9 +304,10 @@ class MemoryStore:
         return normalized
 
     def _evict_oldest(self, mem_type: MemoryType) -> None:
+        """淘汰有效重要性最低的记忆条目，为新条目腾出空间。"""
         typed = sorted(
             self._typed_entries(mem_type),
-            key=lambda entry: (entry.effective_importance(self._decay_half_life), entry.updated_at or "", entry.id),
+            key=lambda entry: (self._forgetting.effective_importance(entry), entry.updated_at or "", entry.id),
         )
         if typed:
             self._entries.pop(typed[0].id, None)
@@ -355,6 +323,7 @@ class MemoryStore:
     # ── CRUD ─────────────────────────────────────────────────────────────────
 
     def add(self, entry: MemoryEntry) -> MemoryEntry:
+        """添加记忆条目。自动去重、冲突合并、容量淘汰。"""
         entry.content = self._validate_content(entry.content)
         entry.key = entry.key.strip()
         entry.tags = _normalize_tags(entry.tags)
@@ -438,11 +407,7 @@ class MemoryStore:
         return self._entries.get(entry_id)
 
     def list_all(self, mem_type: MemoryType | None = None, session_key: str | None = None) -> list[MemoryEntry]:
-        entries = list(self._entries.values())
-        if mem_type is not None:
-            entries = [entry for entry in entries if entry.type == mem_type]
-        if session_key:
-            entries = [entry for entry in entries if self._visible_in_session(entry, session_key)]
+        entries = self._filtered_entries(mem_type, session_key)
         return sorted(entries, key=lambda entry: entry.updated_at or "", reverse=True)
 
     # ── Search ───────────────────────────────────────────────────────────────
@@ -456,11 +421,7 @@ class MemoryStore:
     ) -> list[MemoryEntry]:
         pattern = re.compile(re.escape(query), re.IGNORECASE)
         results: list[MemoryEntry] = []
-        for entry in self._entries.values():
-            if mem_type and entry.type != mem_type:
-                continue
-            if not self._visible_in_session(entry, session_key):
-                continue
+        for entry in self._filtered_entries(mem_type, session_key):
             matched = (
                 pattern.search(entry.content)
                 or pattern.search(entry.key)
@@ -469,7 +430,7 @@ class MemoryStore:
             if matched:
                 entry.touch()
                 results.append(entry)
-        results.sort(key=lambda entry: entry.effective_importance(self._decay_half_life), reverse=True)
+        results.sort(key=lambda entry: self._forgetting.effective_importance(entry), reverse=True)
         return results[:limit]
 
     def search_scored(
@@ -480,28 +441,38 @@ class MemoryStore:
         session_key: str | None = None,
     ) -> list[tuple[MemoryEntry, float]]:
         """Multi-keyword scored search. Returns (entry, score) pairs sorted by score."""
+        if self._retriever is not None:
+            import asyncio
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    pass  # Can't await in sync context, fall through to keyword search
+                else:
+                    results = loop.run_until_complete(
+                        self._retriever.retrieve(query, limit=limit, session_key=session_key or "", mem_type=mem_type)
+                    )
+                    return results
+            except Exception:
+                pass  # fall through to keyword search
+
         words = [
             word.lower() for word in re.findall(r"\w+", query)
             if len(word) > 1 and word.lower() not in _STOP_WORDS
         ]
         if not words:
             return [
-                (entry, entry.effective_importance(self._decay_half_life))
+                (entry, self._forgetting.effective_importance(entry))
                 for entry in self.search_keyword(query, mem_type, limit, session_key=session_key)
             ]
 
         scored: list[tuple[MemoryEntry, float]] = []
-        for entry in self._entries.values():
-            if mem_type and entry.type != mem_type:
-                continue
-            if not self._visible_in_session(entry, session_key):
-                continue
+        for entry in self._filtered_entries(mem_type, session_key):
             haystack = f"{entry.key} {entry.content} {' '.join(entry.tags)}".lower()
             word_hits = sum(1 for word in words if word in haystack)
             if word_hits == 0:
                 continue
             coverage = word_hits / len(words)
-            eff_imp = entry.effective_importance(self._decay_half_life)
+            eff_imp = self._forgetting.effective_importance(entry)
             score = coverage * 0.7 + eff_imp * 0.3
             entry.touch()
             scored.append((entry, score))
@@ -518,12 +489,8 @@ class MemoryStore:
         normalized_key = key.strip()
         if not normalized_key:
             return None
-        for entry in self._entries.values():
-            if (
-                entry.key == normalized_key
-                and (mem_type is None or entry.type == mem_type)
-                and self._visible_in_session(entry, session_key)
-            ):
+        for entry in self._filtered_entries(mem_type, session_key):
+            if entry.key == normalized_key:
                 return entry
         return None
 
@@ -547,11 +514,7 @@ class MemoryStore:
         if not normalized:
             return []
         results: list[MemoryEntry] = []
-        for entry in self._entries.values():
-            if mem_type and entry.type != mem_type:
-                continue
-            if not self._visible_in_session(entry, session_key):
-                continue
+        for entry in self._filtered_entries(mem_type, session_key):
             if normalized in entry.content or normalized in entry.key:
                 results.append(entry)
                 if limit is not None and len(results) >= limit:
@@ -590,7 +553,7 @@ class MemoryStore:
     ) -> str:
         entries = sorted(
             self.list_all(mem_type, session_key=session_key)[:max_entries],
-            key=lambda entry: entry.effective_importance(self._decay_half_life),
+            key=lambda entry: self._forgetting.effective_importance(entry),
             reverse=True,
         )
         if not entries:
@@ -613,7 +576,7 @@ class MemoryStore:
         return "\n".join(lines)
 
     def get_snapshot(self, session_key: str | None = None) -> str:
-        """Build a bounded memory snapshot for system prompt injection."""
+        """构建有界记忆快照，用于注入系统提示。包含长期记忆、用户记忆和环境记忆三部分。"""
         parts: list[str] = []
         long_term = self.read_long_term()
         if long_term:

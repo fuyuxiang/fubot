@@ -7,6 +7,8 @@ import json
 from abc import ABC, abstractmethod
 from typing import Any
 
+import aiohttp
+
 from loguru import logger
 
 
@@ -182,3 +184,100 @@ class HttpTransport(MCPTransport):
             return json.loads("\n".join(data_lines))
         except json.JSONDecodeError:
             return None
+
+
+class StreamableHttpTransport(MCPTransport):
+    """MCP Streamable HTTP transport (2025-03-26 spec).
+
+    Replaces legacy SSE with bidirectional streamable HTTP:
+    - POST sends JSON-RPC, response can be direct JSON or SSE stream
+    - Mcp-Session-Id header for session management
+    - Falls back to legacy HTTP if server doesn't support streamable
+    """
+
+    def __init__(self, url: str, headers: dict[str, str] | None = None):
+        self._url = url
+        self._headers = headers or {}
+        self._session: aiohttp.ClientSession | None = None
+        self._session_id: str | None = None
+        self._response_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+        self._connected = False
+        self._sse_task: asyncio.Task | None = None
+
+    @property
+    def is_connected(self) -> bool:
+        return self._connected
+
+    @property
+    def session_id(self) -> str | None:
+        return self._session_id
+
+    async def connect(self, timeout: float = 60) -> None:
+        self._session = aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=timeout)
+        )
+        self._connected = True
+        logger.debug("Streamable HTTP transport connected to {}", self._url)
+
+    async def send(self, message: dict[str, Any]) -> None:
+        if not self._session:
+            raise ConnectionError("Transport not connected")
+
+        headers = {**self._headers, "Content-Type": "application/json"}
+        if self._session_id:
+            headers["Mcp-Session-Id"] = self._session_id
+
+        async with self._session.post(self._url, json=message, headers=headers) as resp:
+            # Read session ID from response
+            if "Mcp-Session-Id" in resp.headers:
+                self._session_id = resp.headers["Mcp-Session-Id"]
+
+            content_type = resp.headers.get("Content-Type", "")
+
+            if "text/event-stream" in content_type:
+                # SSE streaming response
+                await self._read_sse_response(resp)
+            elif "application/json" in content_type:
+                # Direct JSON response
+                data = await resp.json()
+                await self._response_queue.put(data)
+            else:
+                # Try JSON anyway
+                try:
+                    data = await resp.json()
+                    await self._response_queue.put(data)
+                except Exception:
+                    text = await resp.text()
+                    logger.warning("Unexpected response type '{}': {}", content_type, text[:200])
+
+    async def _read_sse_response(self, resp: Any) -> None:
+        """Parse SSE events from streaming response."""
+        buffer = ""
+        async for chunk in resp.content:
+            text = chunk.decode("utf-8", errors="replace")
+            buffer += text
+            while "\n\n" in buffer:
+                event_text, buffer = buffer.split("\n\n", 1)
+                data_lines = []
+                for line in event_text.split("\n"):
+                    if line.startswith("data: "):
+                        data_lines.append(line[6:])
+                if data_lines:
+                    raw = "\n".join(data_lines)
+                    try:
+                        parsed = json.loads(raw)
+                        await self._response_queue.put(parsed)
+                    except json.JSONDecodeError:
+                        logger.warning("Non-JSON SSE data: {}", raw[:200])
+
+    async def receive(self) -> dict[str, Any]:
+        return await self._response_queue.get()
+
+    async def close(self) -> None:
+        self._connected = False
+        if self._sse_task and not self._sse_task.done():
+            self._sse_task.cancel()
+        if self._session:
+            await self._session.close()
+            self._session = None
+        logger.debug("Streamable HTTP transport closed")

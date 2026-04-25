@@ -57,6 +57,14 @@ class LLMResponse:
     def has_tool_calls(self) -> bool:
         return len(self.tool_calls) > 0
 
+    @property
+    def cache_hit_rate(self) -> float:
+        total_input = self.usage.get("input_tokens", 0)
+        cache_read = self.usage.get("cache_read_input_tokens", 0)
+        if total_input + cache_read == 0:
+            return 0.0
+        return cache_read / (total_input + cache_read)
+
 
 @dataclass(frozen=True)
 class GenerationParams:

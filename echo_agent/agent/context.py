@@ -76,9 +76,11 @@ def build_recalled_memory_block(raw_context: str) -> str:
     )
 
 
-def build_memory_context(memory_store: Any, snapshot: str = "", session_key: str = "") -> str:
+def build_memory_context(memory_store: Any, snapshot: str = "", session_key: str = "", working_memory: str = "") -> str:
     """Build the memory section for the system prompt."""
     parts: list[str] = [_MEMORY_GUIDANCE]
+    if working_memory:
+        parts.append(f"## Active Context\n\n{working_memory}")
     if snapshot:
         parts.append(snapshot)
     elif memory_store is not None:
@@ -131,17 +133,17 @@ class ContextBuilder:
         if bootstrap:
             parts.append(bootstrap)
 
-        if user_profile:
-            parts.append(f"# User Profile\n\n{user_profile}")
-
-        if env_context:
-            parts.append(f"# Environment Context\n\n{env_context}")
-
         if memory_context:
             parts.append(f"# Memory\n\n{memory_context}")
 
         if skills_context:
             parts.append(f"# Active Skills\n\n{skills_context}")
+
+        if user_profile:
+            parts.append(f"# User Profile\n\n{user_profile}")
+
+        if env_context:
+            parts.append(f"# Environment Context\n\n{env_context}")
 
         if custom_instructions:
             parts.append(f"# Custom Instructions\n\n{custom_instructions}")

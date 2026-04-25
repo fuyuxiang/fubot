@@ -91,10 +91,14 @@ class LocalExecutor(BaseExecutor):
                 request.command,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                stdin=asyncio.subprocess.PIPE if request.stdin else None,
                 cwd=cwd,
                 env=env,
             )
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=request.timeout)
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(request.stdin.encode() if request.stdin else None),
+                timeout=request.timeout,
+            )
             duration = int((datetime.now() - start).total_seconds() * 1000)
             return ExecResponse(
                 success=proc.returncode == 0,
@@ -115,14 +119,35 @@ class SandboxExecutor(BaseExecutor):
 
     name = "sandbox"
 
-    def __init__(self, sandbox_root: str = "/tmp/echo-agent-sandbox", network_policy: str = "deny"):
+    def __init__(
+        self,
+        sandbox_root: str = "/tmp/echo-agent-sandbox",
+        network_policy: str = "deny",
+        workspace: str = "",
+    ):
         self._root = Path(sandbox_root)
         self._network_policy = network_policy
+        self._source_workspace = Path(workspace).resolve() if workspace else None
         self._sandbox_dir: Path | None = None
+        self._workdir: Path | None = None
 
     async def setup(self) -> None:
         self._root.mkdir(parents=True, exist_ok=True)
         self._sandbox_dir = Path(tempfile.mkdtemp(dir=self._root, prefix="sandbox_"))
+        self._workdir = self._sandbox_dir / "workspace"
+        if self._source_workspace and self._source_workspace.exists():
+            ignore = shutil.ignore_patterns(
+                ".git",
+                "__pycache__",
+                ".pytest_cache",
+                ".ruff_cache",
+                ".venv",
+                "node_modules",
+                "data/logs",
+            )
+            shutil.copytree(self._source_workspace, self._workdir, dirs_exist_ok=True, ignore=ignore)
+        else:
+            self._workdir.mkdir(parents=True, exist_ok=True)
         logger.info("Sandbox created at {}", self._sandbox_dir)
 
     async def teardown(self) -> None:
@@ -132,7 +157,7 @@ class SandboxExecutor(BaseExecutor):
     async def execute(self, request: ExecRequest) -> ExecResponse:
         if not self._sandbox_dir:
             await self.setup()
-        cwd = str(self._sandbox_dir)
+        cwd = str(self._resolve_cwd(request.cwd))
         env = self.inject_credentials({"HOME": cwd, "TMPDIR": cwd}, request.credentials)
         env.update(request.env)
         env["PATH"] = os.environ.get("PATH", "/usr/bin:/bin")
@@ -143,10 +168,14 @@ class SandboxExecutor(BaseExecutor):
                 request.command,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                stdin=asyncio.subprocess.PIPE if request.stdin else None,
                 cwd=cwd,
                 env=env,
             )
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=request.timeout)
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(request.stdin.encode() if request.stdin else None),
+                timeout=request.timeout,
+            )
             duration = int((datetime.now() - start).total_seconds() * 1000)
             return ExecResponse(
                 success=proc.returncode == 0,
@@ -160,3 +189,18 @@ class SandboxExecutor(BaseExecutor):
             return ExecResponse(success=False, stderr=f"Timeout after {request.timeout}s", return_code=-1, executor=self.name)
         except Exception as e:
             return ExecResponse(success=False, stderr=str(e), return_code=-1, executor=self.name)
+
+    def _resolve_cwd(self, requested_cwd: str) -> Path:
+        if not self._workdir:
+            assert self._sandbox_dir
+            return self._sandbox_dir
+        if not requested_cwd or not self._source_workspace:
+            return self._workdir
+        try:
+            rel = Path(requested_cwd).resolve().relative_to(self._source_workspace)
+            target = (self._workdir / rel).resolve()
+            target.relative_to(self._workdir)
+            target.mkdir(parents=True, exist_ok=True)
+            return target
+        except ValueError:
+            return self._workdir

@@ -43,12 +43,16 @@ def validate_mcp_tools(
     builtin_names: set[str],
     include_filter: list[str] | None = None,
     exclude_filter: list[str] | None = None,
+    policy: str = "block",
 ) -> list[dict[str, Any]]:
     accepted: list[dict[str, Any]] = []
 
     for tool in tools:
         name = tool.get("name", "")
         desc = tool.get("description", "")
+        if not name:
+            logger.warning("MCP server '{}' exposed a tool without a name — skipping", server_name)
+            continue
 
         if include_filter and name not in include_filter:
             continue
@@ -67,6 +71,8 @@ def validate_mcp_tools(
                 "MCP tool '{}/{}' description has suspicious patterns: {}",
                 server_name, name, ", ".join(findings),
             )
+            if policy == "block":
+                continue
 
         accepted.append(tool)
 

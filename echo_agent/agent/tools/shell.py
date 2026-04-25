@@ -8,6 +8,7 @@ import re
 from pathlib import Path
 from typing import Any
 
+from echo_agent.agent.executors.base import BaseExecutor, ExecRequest
 from echo_agent.agent.tools.base import Tool, ToolExecutionContext, ToolPermission, ToolResult
 
 
@@ -34,11 +35,19 @@ class ShellTool(Tool):
         (re.compile(r"\b(shutdown|reboot|halt|poweroff)\b"), "system shutdown"),
     ]
 
-    def __init__(self, workspace: str, allowed: list[str] | None = None, blocked: list[str] | None = None, max_output: int = 16000):
+    def __init__(
+        self,
+        workspace: str,
+        allowed: list[str] | None = None,
+        blocked: list[str] | None = None,
+        max_output: int = 16000,
+        executor: BaseExecutor | None = None,
+    ):
         self._workspace = str(Path(workspace).resolve())
         self._allowed = allowed or []
         self._blocked = blocked or []
         self._max_output = max_output
+        self._executor = executor
 
     def _check_command(self, command: str) -> str | None:
         cmd_name = command.strip().split()[0] if command.strip() else ""
@@ -72,16 +81,31 @@ class ShellTool(Tool):
                 cwd = self._resolve_cwd(cwd)
             except ValueError:
                 return ToolResult(success=False, error=f"cwd is outside workspace: {cwd}")
-            proc = await asyncio.create_subprocess_shell(
-                command,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=cwd,
-                env={**os.environ, "WORKSPACE": self._workspace},
-            )
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-            output = stdout.decode(errors="replace")
-            err_output = stderr.decode(errors="replace")
+            if self._executor:
+                response = await self._executor.execute(ExecRequest(
+                    command=command,
+                    cwd=cwd,
+                    timeout=timeout,
+                    env={"WORKSPACE": self._workspace},
+                    credentials=ctx.credentials if ctx else {},
+                ))
+                output = response.stdout
+                err_output = response.stderr
+                return_code = response.return_code
+                executor_name = response.executor
+            else:
+                proc = await asyncio.create_subprocess_shell(
+                    command,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    cwd=cwd,
+                    env={**os.environ, "WORKSPACE": self._workspace},
+                )
+                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+                output = stdout.decode(errors="replace")
+                err_output = stderr.decode(errors="replace")
+                return_code = proc.returncode or 0
+                executor_name = "direct"
 
             if len(output) > self._max_output:
                 output = output[:self._max_output] + f"\n... (truncated, {len(output)} total chars)"
@@ -91,10 +115,10 @@ class ShellTool(Tool):
                 combined += f"\nSTDERR:\n{err_output}"
 
             return ToolResult(
-                success=proc.returncode == 0,
+                success=return_code == 0,
                 output=combined,
-                error=err_output if proc.returncode != 0 else "",
-                metadata={"return_code": proc.returncode},
+                error=err_output if return_code != 0 else "",
+                metadata={"return_code": return_code, "executor": executor_name},
             )
         except asyncio.TimeoutError:
             return ToolResult(success=False, error=f"Command timed out after {timeout}s")

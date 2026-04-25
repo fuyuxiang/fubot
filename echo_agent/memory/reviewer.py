@@ -10,7 +10,8 @@ from typing import Any
 
 from loguru import logger
 
-from echo_agent.memory.store import MemoryEntry, MemoryStore, MemoryType
+from echo_agent.memory.store import MemoryStore
+from echo_agent.memory.types import MemoryEntry, MemoryType
 from echo_agent.models.provider import LLMProvider
 
 _REVIEW_PROMPT = """\
@@ -64,6 +65,10 @@ class MemoryReviewer:
         self._store = store
         self._model = model
         self._session_key = session_key
+        self._graph = None  # set via set_graph()
+
+    def set_graph(self, graph):
+        self._graph = graph
 
     def _resolve_entry(self, key: str, old_text: str, mem_type: MemoryType) -> tuple[MemoryEntry | None, str | None]:
         if key:
@@ -123,6 +128,21 @@ class MemoryReviewer:
 
         if actions:
             logger.info("Memory review completed with {} action(s)", len(actions))
+
+        if self._graph and actions:
+            try:
+                full_text = "\n".join(
+                    str(m.get("content", "")) for m in conversation if m.get("content")
+                )
+                if len(full_text) > 200:
+                    triples = await self._graph.extract_entities_and_relations(
+                        full_text[:3000], self._provider.chat_with_retry
+                    )
+                    if triples:
+                        logger.info("Extracted {} entity-relation triples from conversation", len(triples))
+            except Exception as e:
+                logger.warning("Graph extraction failed: {}", e)
+
         return actions
 
     def _execute(self, params: dict[str, Any]) -> str:

@@ -8,6 +8,7 @@ from typing import Any, Awaitable, Callable
 from loguru import logger
 
 from echo_agent.memory.store import MemoryStore
+from echo_agent.memory.types import MemoryTier
 
 _SAVE_MEMORY_TOOL = [
     {
@@ -50,6 +51,26 @@ class MemoryConsolidator:
         self._llm_call = llm_call
         self.context_window_tokens = context_window_tokens
         self._consolidation_threshold = consolidation_threshold
+        self._episodic_manager = None  # set via set_episodic_manager()
+        self._semantic_manager = None
+        self._forgetting_curve = None
+        self._contradiction_detector = None
+        self._archival_manager = None
+
+    def set_episodic_manager(self, mgr):
+        self._episodic_manager = mgr
+
+    def set_semantic_manager(self, mgr):
+        self._semantic_manager = mgr
+
+    def set_forgetting_curve(self, curve):
+        self._forgetting_curve = curve
+
+    def set_contradiction_detector(self, detector):
+        self._contradiction_detector = detector
+
+    def set_archival_manager(self, mgr):
+        self._archival_manager = mgr
 
     async def consolidate_chunk(self, messages: list[dict[str, Any]]) -> bool:
         if not messages:
@@ -98,6 +119,63 @@ class MemoryConsolidator:
         except Exception as e:
             logger.error("Memory consolidation failed: {}", e)
             return False
+
+    async def sleep_consolidate(self, session_key: str, messages: list[dict[str, Any]]) -> dict[str, int]:
+        """Sleep-time consolidation pipeline:
+        1. Create episode from messages
+        2. Extract semantic facts and promote
+        3. Run contradiction detection
+        4. Run forgetting/archival pass
+        Returns stats dict.
+        """
+        stats = {"episodes": 0, "promoted": 0, "contradictions": 0, "archived": 0, "forgotten": 0}
+
+        # Step 1: Create episode
+        if self._episodic_manager and messages:
+            summary_result = await self.consolidate_chunk(messages)
+            if summary_result:
+                current_memory = self.store.read_long_term()
+                from echo_agent.memory.types import Episode
+                episode = await self._episodic_manager.create_episode(
+                    session_key=session_key,
+                    messages=messages,
+                    summary=current_memory[:500] if current_memory else "conversation episode",
+                    message_range=(0, len(messages)),
+                )
+                stats["episodes"] = 1
+
+                # Step 2: Promote to semantic
+                if self._semantic_manager:
+                    try:
+                        response = await self._llm_call(
+                            messages=[
+                                {"role": "system", "content": "Extract key facts from this episode summary. Return a JSON array of objects with keys: type (user/environment), key, content, importance (0-1)."},
+                                {"role": "user", "content": episode.summary},
+                            ],
+                        )
+                        if response.content:
+                            import json as _json
+                            try:
+                                facts = _json.loads(response.content)
+                                if isinstance(facts, list):
+                                    promoted = await self._semantic_manager.promote_from_episodic(episode, facts)
+                                    stats["promoted"] = len(promoted)
+                            except _json.JSONDecodeError:
+                                pass
+                    except Exception as e:
+                        logger.warning("Fact extraction failed: {}", e)
+
+        # Step 3: Run forgetting pass
+        if self._forgetting_curve:
+            all_entries = list(self.store._entries.values())
+            to_archive, to_forget = await self._forgetting_curve.run_decay_pass(all_entries)
+            if to_archive and self._archival_manager:
+                stats["archived"] = await self._archival_manager.archive(to_archive)
+            if to_forget and self._archival_manager:
+                stats["forgotten"] = await self._archival_manager.delete_forgotten(to_forget)
+
+        logger.info("Sleep consolidation complete: {}", stats)
+        return stats
 
     def should_consolidate(self, session_message_count: int, last_consolidated: int) -> bool:
         unconsolidated = session_message_count - last_consolidated

@@ -96,6 +96,7 @@ async def _bootstrap(
             def get_default_model(self):
                 return "stub"
         provider = _StubProvider()
+        router.register_provider("stub", provider)
 
     from echo_agent.scheduler.service import Scheduler
     scheduler: Scheduler | None = None
@@ -112,6 +113,7 @@ async def _bootstrap(
 
     agent = AgentLoop(
         bus=bus, config=config, provider=provider, workspace=ws,
+        router=router,
         scheduler=scheduler, storage=storage,
         task_manager=task_manager, workflow_engine=workflow_engine,
     )
@@ -127,7 +129,7 @@ async def _bootstrap(
         return CH.HEALTHY if agent._running else CH.UNHEALTHY
 
     async def _check_storage() -> CH:
-        return CH.HEALTHY if storage._conn else CH.UNHEALTHY
+        return CH.HEALTHY if storage._db else CH.UNHEALTHY
 
     health.register_check("bus", _check_bus)
     health.register_check("agent", _check_agent)
@@ -195,6 +197,8 @@ async def _run(config_path: str | None = None, workspace: str | None = None) -> 
             channel_manager=ctx.channels,
             session_manager=ctx.agent.sessions,
             workspace=ctx.workspace,
+            agent_loop=ctx.agent,
+            a2a_config=ctx.config.a2a,
         )
         await gateway.start()
         logger.info("Gateway started on {}:{}", ctx.config.gateway.host, ctx.config.gateway.port)
@@ -241,6 +245,8 @@ async def _run_gateway(config_path: str | None = None, host: str | None = None, 
         channel_manager=ctx.channels,
         session_manager=ctx.agent.sessions,
         workspace=ctx.workspace,
+        agent_loop=ctx.agent,
+        a2a_config=ctx.config.a2a,
     )
     await gateway.start()
     logger.info("Gateway listening on {}:{}", ctx.config.gateway.host, ctx.config.gateway.port)
@@ -252,6 +258,62 @@ async def _run_gateway(config_path: str | None = None, host: str | None = None, 
     await ctx.agent.stop()
     await ctx.bus.stop()
     await ctx.storage.close()
+
+
+def _run_eval(args) -> None:
+    from pathlib import Path as _Path
+
+    config_path = args.config or getattr(args, "top_config", None)
+    workspace = args.workspace or getattr(args, "top_workspace", None)
+
+    from echo_agent.config.loader import load_config, resolve_config_file
+    config_file = resolve_config_file(config_path)
+    config = load_config(config_path=config_file)
+
+    dataset_path = args.dataset or config.evaluation.dataset_path
+    path = _Path(dataset_path)
+    if not path.exists():
+        print(f"Dataset not found: {path}")
+        print("Create a YAML file with test cases. Example:")
+        print("  - id: test_001")
+        print("    input: 'Hello'")
+        print("    expected_contains: ['hello', 'hi']")
+        return
+
+    from echo_agent.evaluation import EvalRunner, EvalDataset
+
+    dataset = EvalDataset.from_path(path)
+    if args.tag:
+        cases = dataset.filter_by_tag(args.tag)
+        dataset = EvalDataset(cases)
+
+    if not dataset.cases:
+        print("No test cases found.")
+        return
+
+    async def run():
+        overrides = {"workspace": workspace} if workspace else None
+        ctx = await _bootstrap(config_path=config_path, overrides=overrides)
+        await ctx.bus.start()
+        await ctx.agent.start()
+
+        try:
+            runner = EvalRunner(ctx.agent, parallel=args.parallel, timeout=config.evaluation.timeout_per_case)
+            report = await runner.run_dataset(dataset)
+
+            from echo_agent.evaluation.reporter import EvalReporter
+            reporter = EvalReporter()
+            print(reporter.to_table(report))
+
+            if args.output:
+                _Path(args.output).write_text(reporter.to_json(report), encoding="utf-8")
+                print(f"\nResults saved to {args.output}")
+        finally:
+            await ctx.agent.stop()
+            await ctx.bus.stop()
+            await ctx.storage.close()
+
+    asyncio.run(run())
 
 
 def main() -> None:
@@ -281,6 +343,15 @@ def main() -> None:
     gw_parser.add_argument("--host", help="Gateway host")
     gw_parser.add_argument("--port", type=int, help="Gateway port")
 
+    # eval
+    eval_parser = subparsers.add_parser("eval", help="Run evaluation test suite")
+    eval_parser.add_argument("--dataset", "-d", default="", help="Path to eval dataset (YAML/JSON)")
+    eval_parser.add_argument("--tag", "-t", default="", help="Filter cases by tag")
+    eval_parser.add_argument("--parallel", "-p", type=int, default=3, help="Parallel cases")
+    eval_parser.add_argument("--output", "-o", default="", help="Output file for results")
+    eval_parser.add_argument("-c", "--config", help="Path to config file")
+    eval_parser.add_argument("-w", "--workspace", help="Workspace directory")
+
     # top-level flags for backward compat
     parser.add_argument("-c", "--config", help="Path to config file", dest="top_config")
     parser.add_argument("-w", "--workspace", help="Workspace directory", dest="top_workspace")
@@ -302,6 +373,10 @@ def main() -> None:
             asyncio.run(_run_gateway(config_path=args.config or args.top_config, host=args.host, port=args.port, workspace=args.workspace or args.top_workspace))
         except KeyboardInterrupt:
             pass
+        return
+
+    if args.command == "eval":
+        _run_eval(args)
         return
 
     # "run" command or no command (backward compat)

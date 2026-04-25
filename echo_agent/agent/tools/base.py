@@ -62,6 +62,7 @@ class ToolExecutionContext:
     idempotency_key: str = ""
     is_replay: bool = False
     parent_execution_id: str | None = None
+    credentials: dict[str, str] = field(default_factory=dict)
 
     def log_fields(self) -> dict[str, Any]:
         return {

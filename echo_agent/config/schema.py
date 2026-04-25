@@ -186,6 +186,7 @@ class ProviderConfig(_Base):
 class ModelRouteConfig(_Base):
     model: str = ""
     provider: str = ""
+    task_types: list[str] = Field(default_factory=list)
     fallback_models: list[str] = Field(default_factory=list)
     max_tokens: int = 4096
     temperature: float = 0.7
@@ -215,6 +216,8 @@ class WebToolConfig(_Base):
     proxy: str | None = None
     timeout_seconds: int = 30
     search_api_key: str = ""
+    search_provider: Literal["brave", "tavily", "serpapi", "searxng"] = "brave"
+    search_api_base: str = ""
 
 
 class ImageGenConfig(_Base):
@@ -247,6 +250,7 @@ class MCPServerConfig(_Base):
     connect_timeout: int = 60
     tools_include: list[str] = Field(default_factory=list)
     tools_exclude: list[str] = Field(default_factory=list)
+    transport: Literal["auto", "stdio", "http", "streamable-http"] = "auto"
 
 
 class ToolsConfig(_Base):
@@ -254,6 +258,7 @@ class ToolsConfig(_Base):
     web: WebToolConfig = Field(default_factory=WebToolConfig)
     restrict_to_workspace: bool = True
     mcp_servers: dict[str, MCPServerConfig] = Field(default_factory=dict)
+    mcp_security_policy: Literal["warn", "block"] = "block"
     image_gen: ImageGenConfig = Field(default_factory=ImageGenConfig)
     tts: TTSConfig = Field(default_factory=TTSConfig)
     code_exec: CodeExecConfig = Field(default_factory=CodeExecConfig)
@@ -266,15 +271,22 @@ class ExecutionConfig(_Base):
     sandbox_root: str = "/tmp/echo-agent-sandbox"
     container_image: str = ""
     remote_host: str = ""
+    remote_user: str = "root"
+    remote_key_path: str = ""
+    remote_strict_host_key: Literal["no", "accept-new", "yes"] = "accept-new"
+    remote_connect_timeout: int = 10
     network_policy: Literal["allow", "deny", "restricted"] = "allow"
 
 
 # ── Permission configs ───────────────────────────────────────────────────────
 
 class PermissionRule(_Base):
+    level: Literal["user", "channel", "tool", "file", "workspace", "admin"] = "tool"
+    subject: str = "*"
     action: str = "*"
     effect: Literal["allow", "deny"] = "allow"
     scope: str = "*"
+    priority: int = 0
 
 
 class ApprovalConfig(_Base):
@@ -288,6 +300,11 @@ class PermissionsConfig(_Base):
     admin_users: list[str] = Field(default_factory=list)
     rules: list[PermissionRule] = Field(default_factory=list)
     approval: ApprovalConfig = Field(default_factory=ApprovalConfig)
+
+
+class CredentialSecurityConfig(_Base):
+    encryption_key_env: str = "ECHO_AGENT_CREDENTIAL_KEY"
+    require_encryption: bool = False
 
 
 # ── Session configs ──────────────────────────────────────────────────────────
@@ -313,6 +330,66 @@ class MemoryConfig(_Base):
     memory_nudge_interval: int = 15
     importance_decay_days: float = 30.0
     snapshot_enabled: bool = True
+    graph_enabled: bool = False
+    hybrid_retrieval: bool = True
+    prefetch_enabled: bool = False
+    contradiction_detection: bool = False
+    adaptive_forgetting: bool = True
+    sleep_consolidation: bool = True
+    archival_threshold: float = 0.05
+    forget_threshold: float = 0.01
+    max_working_memory: int = 20
+    max_episodes: int = 500
+    embedding_model: str = ""
+    embedding_batch_size: int = 32
+    consolidation_idle_seconds: int = 300
+
+
+class KnowledgeConfig(_Base):
+    enabled: bool = False
+    docs_dir: str = "data/knowledge"
+    index_path: str = "data/knowledge_index.json"
+    auto_index: bool = True
+    chunk_size: int = 1200
+    chunk_overlap: int = 120
+    max_results: int = 5
+    allowed_extensions: list[str] = Field(
+        default_factory=lambda: [".md", ".txt", ".rst", ".json", ".yaml", ".yml", ".py"]
+    )
+    require_citations: bool = True
+
+
+# ── Multi-agent dispatch configs ─────────────────────────────────────────────
+
+class AgentProfileConfig(_Base):
+    id: str = ""
+    name: str = ""
+    description: str = ""
+    instructions: str = ""
+    capabilities: list[str] = Field(default_factory=list)
+    keywords: list[str] = Field(default_factory=list)
+    task_types: list[str] = Field(default_factory=list)
+    tools_allow: list[str] = Field(default_factory=list)
+    tools_deny: list[str] = Field(default_factory=list)
+    model: str = ""
+    provider: str = ""
+    max_iterations: int = 8
+    max_tokens: int = 4096
+    temperature: float = 0.4
+    priority: int = 0
+
+
+class MultiAgentConfig(_Base):
+    enabled: bool = False
+    mode: Literal["assist", "auto"] = "auto"
+    default_agent: str = "general"
+    route_threshold: float = 0.45
+    multi_threshold: float = 0.62
+    max_parallel_agents: int = 3
+    max_iterations: int = 8
+    synthesize_results: bool = True
+    audit_path: str = "data/multi_agent_dispatch.jsonl"
+    agents: list[AgentProfileConfig] = Field(default_factory=list)
 
 
 # ── Scheduler configs ───────────────────────────────────────────────────────
@@ -342,6 +419,10 @@ class ObservabilityConfig(_Base):
     show_tool_calls: bool = True
     show_route_decisions: bool = False
     health_check_interval_seconds: int = 60
+    otel_enabled: bool = True
+    otel_endpoint: str = ""
+    otel_service_name: str = "echo-agent"
+    otel_export_interval_ms: int = 5000
 
 
 # ── Compression configs ──────────────────────────────────────────────────────
@@ -380,6 +461,9 @@ class GatewayPlatformConfig(_Base):
 class GatewayAuthConfig(_Base):
     mode: Literal["open", "allowlist", "pairing"] = "allowlist"
     allowed_users: list[str] = Field(default_factory=list)
+    admin_users: list[str] = Field(default_factory=list)
+    api_tokens: list[str] = Field(default_factory=list)
+    token_header: str = "X-Echo-Agent-Token"
     pairing_ttl_seconds: int = 300
 
 
@@ -412,18 +496,46 @@ class SkillsConfig(_Base):
 
 # ── Root config ──────────────────────────────────────────────────────────────
 
+class PlanningConfig(_Base):
+    enabled: bool = True
+    default_strategy: str = "auto"
+    max_tree_depth: int = 5
+    max_branches: int = 3
+    reflection_enabled: bool = True
+
+
+class A2AConfig(_Base):
+    enabled: bool = True
+    agent_name: str = "echo-agent"
+    agent_description: str = "A modular AI agent framework"
+    capabilities: list[str] = Field(default_factory=lambda: ["chat", "tool_use"])
+
+
+class EvalConfig(_Base):
+    enabled: bool = True
+    dataset_path: str = "data/eval"
+    parallel_cases: int = 3
+    timeout_per_case: int = 120
+
+
 class Config(_Base):
     channels: ChannelsConfig = Field(default_factory=ChannelsConfig)
     models: ModelsConfig = Field(default_factory=ModelsConfig)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
     execution: ExecutionConfig = Field(default_factory=ExecutionConfig)
     permissions: PermissionsConfig = Field(default_factory=PermissionsConfig)
+    credentials: CredentialSecurityConfig = Field(default_factory=CredentialSecurityConfig)
     session: SessionConfig = Field(default_factory=SessionConfig)
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
+    knowledge: KnowledgeConfig = Field(default_factory=KnowledgeConfig)
+    multi_agent: MultiAgentConfig = Field(default_factory=MultiAgentConfig)
     scheduler: SchedulerConfig = Field(default_factory=SchedulerConfig)
     storage: StorageConfig = Field(default_factory=StorageConfig)
     observability: ObservabilityConfig = Field(default_factory=ObservabilityConfig)
     skills: SkillsConfig = Field(default_factory=SkillsConfig)
     compression: CompressionConfig = Field(default_factory=CompressionConfig)
     gateway: GatewayConfig = Field(default_factory=GatewayConfig)
+    planning: PlanningConfig = Field(default_factory=PlanningConfig)
+    a2a: A2AConfig = Field(default_factory=A2AConfig)
+    evaluation: EvalConfig = Field(default_factory=EvalConfig)
     workspace: str = "~/.echo-agent"

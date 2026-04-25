@@ -104,7 +104,7 @@ class AnthropicProvider(LLMProvider):
             params["system"] = system_blocks
 
         if tools:
-            params["tools"] = openai_to_anthropic_tools(tools)
+            params["tools"] = openai_to_anthropic_tools(tools, inject_cache_markers=self._enable_cache)
         if tool_choice and tools:
             params["tool_choice"] = self._convert_tool_choice(tool_choice)
 

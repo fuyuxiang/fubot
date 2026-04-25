@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hmac
 import secrets
 import time
 from pathlib import Path
@@ -18,9 +19,13 @@ class GatewayAuth:
     def __init__(self, config: GatewayAuthConfig, data_dir: Path):
         self._mode = config.mode
         self._allowed = set(config.allowed_users)
+        self._admins = set(config.admin_users)
+        self._api_tokens = list(config.api_tokens)
+        self.token_header = config.token_header
         self._pairing_ttl = config.pairing_ttl_seconds
         self._data_dir = data_dir / "gateway_auth"
         self._data_dir.mkdir(parents=True, exist_ok=True)
+        self._audit_path = self._data_dir / "audit.jsonl"
 
         self._approved: dict[str, set[str]] = {}
         self._pending_codes: dict[str, dict[str, Any]] = {}
@@ -42,6 +47,42 @@ class GatewayAuth:
 
         return False
 
+    def authenticate_token(self, token: str) -> bool:
+        if not self._api_tokens:
+            return True
+        if not token:
+            return False
+        return any(hmac.compare_digest(token, configured) for configured in self._api_tokens)
+
+    def token_from_headers(self, headers: Any) -> str:
+        token = headers.get(self.token_header, "")
+        if token:
+            return token.strip()
+        auth = headers.get("Authorization", "")
+        if auth.lower().startswith("bearer "):
+            return auth[7:].strip()
+        return ""
+
+    def authenticate_headers(self, headers: Any) -> bool:
+        return self.authenticate_token(self.token_from_headers(headers))
+
+    def is_admin(self, platform: str, user_id: str, token: str = "") -> bool:
+        if token and self._api_tokens and self.authenticate_token(token):
+            return True
+        return user_id in self._admins or f"{platform}:{user_id}" in self._admins
+
+    def audit(self, action: str, *, platform: str = "", user_id: str = "", ok: bool = True, reason: str = "") -> None:
+        record = {
+            "ts": time.time(),
+            "action": action,
+            "platform": platform,
+            "user_id": user_id,
+            "ok": ok,
+            "reason": reason,
+        }
+        with self._audit_path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
     def generate_pairing_code(self, platform: str) -> str:
         code = secrets.token_hex(3).upper()
         self._pending_codes[code] = {
@@ -49,7 +90,8 @@ class GatewayAuth:
             "created_at": time.time(),
         }
         self._save_pending()
-        logger.info("Pairing code generated for {}: {}", platform, code)
+        logger.info("Pairing code generated for {}", platform)
+        self.audit("pair_generate", platform=platform)
         return code
 
     def verify_pairing(self, platform: str, user_id: str, code: str) -> bool:
@@ -75,6 +117,7 @@ class GatewayAuth:
         self._save_approved(platform)
 
         logger.info("User {}:{} paired successfully", platform, user_id)
+        self.audit("pair_verify", platform=platform, user_id=user_id)
         return True
 
     def _load_approved(self) -> None:

@@ -15,7 +15,7 @@ from echo_agent.config.schema import MCPServerConfig
 from echo_agent.mcp.client import MCPClient
 from echo_agent.mcp.security import validate_mcp_tools
 from echo_agent.mcp.tool_adapter import MCPToolAdapter
-from echo_agent.mcp.transport import HttpTransport, StdioTransport
+from echo_agent.mcp.transport import HttpTransport, StdioTransport, StreamableHttpTransport
 
 
 _RECONNECT_DELAYS = (1, 2, 4, 8, 16, 30, 60)
@@ -24,8 +24,9 @@ _MAX_RECONNECT_ATTEMPTS = 5
 
 class MCPManager:
 
-    def __init__(self, workspace: Path):
+    def __init__(self, workspace: Path, security_policy: str = "block"):
         self._workspace = workspace
+        self._security_policy = security_policy
         self._clients: dict[str, MCPClient] = {}
         self._configs: dict[str, MCPServerConfig] = {}
         self._registered_tools: dict[str, list[str]] = {}
@@ -86,7 +87,7 @@ class MCPManager:
         return [name for name, client in self._clients.items() if client.is_connected]
 
     async def _connect_server(self, name: str, cfg: MCPServerConfig) -> None:
-        transport = self._create_transport(name, cfg)
+        transport = await self._create_transport(name, cfg)
         client = MCPClient(name, transport)
 
         for attempt in range(_MAX_RECONNECT_ATTEMPTS):
@@ -103,17 +104,16 @@ class MCPManager:
                 else:
                     raise ConnectionError(f"Failed to connect to MCP server '{name}' after {_MAX_RECONNECT_ATTEMPTS} attempts: {e}")
 
-    def _create_transport(self, name: str, cfg: MCPServerConfig) -> Any:
+    async def _create_transport(self, name: str, cfg: MCPServerConfig) -> Any:
         if cfg.url:
             headers = self._resolve_env_vars(cfg.headers)
             if cfg.auth == "oauth":
                 token_dir = self._workspace / "data" / "mcp_tokens"
                 from echo_agent.mcp.oauth import MCPOAuthClient
                 oauth = MCPOAuthClient(name, cfg.url, token_dir)
-                token = oauth.get_access_token()
-                if token:
-                    headers["Authorization"] = f"Bearer {token}"
-            return HttpTransport(url=cfg.url, headers=headers)
+                token = await oauth.ensure_token()
+                headers["Authorization"] = f"Bearer {token}"
+            return StreamableHttpTransport(url=cfg.url, headers=headers)
         elif cfg.command:
             env = self._resolve_env_vars(cfg.env)
             return StdioTransport(command=cfg.command, args=cfg.args, env=env)
@@ -134,6 +134,7 @@ class MCPManager:
             builtin_names=builtin_names,
             include_filter=include or None,
             exclude_filter=exclude or None,
+            policy=self._security_policy,
         )
 
         registered_names: list[str] = []

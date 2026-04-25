@@ -57,6 +57,10 @@ class TraceLogger:
         if logs_dir:
             logs_dir.mkdir(parents=True, exist_ok=True)
         self._traces: dict[str, list[TraceSpan]] = {}
+        self._otel_tracer = None
+
+    def set_otel_tracer(self, tracer) -> None:
+        self._otel_tracer = tracer
 
     def start_span(self, trace_id: str, span_id: str, name: str, kind: str, parent_id: str = "") -> TraceSpan:
         span = TraceSpan(
@@ -64,6 +68,14 @@ class TraceLogger:
             name=name, kind=kind, started_at=time.time(),
         )
         self._traces.setdefault(trace_id, []).append(span)
+        if self._otel_tracer:
+            from echo_agent.observability.spans import start_llm_span, start_tool_span, start_agent_span
+            if kind == "llm_call":
+                span._otel_span = start_llm_span(self._otel_tracer, "", "", "chat")
+            elif kind == "tool_call":
+                span._otel_span = start_tool_span(self._otel_tracer, name)
+            else:
+                span._otel_span = start_agent_span(self._otel_tracer, 0)
         return span
 
     def end_span(self, span: TraceSpan, error: str = "", metadata: dict[str, Any] | None = None) -> None:
@@ -71,6 +83,10 @@ class TraceLogger:
         span.error = error
         if metadata:
             span.metadata.update(metadata)
+        otel_span = getattr(span, "_otel_span", None)
+        if otel_span:
+            from echo_agent.observability.spans import end_llm_span
+            end_llm_span(otel_span, error)
 
     def get_trace(self, trace_id: str) -> list[TraceSpan]:
         return self._traces.get(trace_id, [])
