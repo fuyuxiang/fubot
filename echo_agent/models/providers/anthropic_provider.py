@@ -42,7 +42,7 @@ def _supports_adaptive_thinking(model: str) -> bool:
 
 class AnthropicProvider(LLMProvider):
 
-    def __init__(self, api_key: str = "", api_base: str = "", default_model: str = "claude-sonnet-4-20250514", **kwargs: Any):
+    def __init__(self, api_key: str = "", api_base: str = "", default_model: str = "", **kwargs: Any):
         super().__init__(api_key=api_key, api_base=api_base)
         self._default_model = default_model
         self._enable_cache = kwargs.get("enable_cache", True)

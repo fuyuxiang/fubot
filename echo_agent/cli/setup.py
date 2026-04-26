@@ -109,17 +109,26 @@ def setup_model(config: dict) -> None:
 
     # Model selection
     if preset_models:
-        model_default = 0
+        custom_model_idx = len(preset_models)
+        model_default = custom_model_idx
         if existing_model in preset_models:
             model_default = preset_models.index(existing_model)
         model_choices = preset_models + ["Enter custom model name"]
         model_idx = prompt_choice("Select default model:", model_choices, default=model_default)
-        if model_idx == len(preset_models):
+        if model_idx == custom_model_idx:
             default_model = prompt("  Model name", default=existing_model)
         else:
             default_model = preset_models[model_idx]
     else:
-        default_model = prompt("  Default model name", default=existing_model or "gpt-4o")
+        default_model = ""
+        while not default_model:
+            default_model = prompt("  Default model name", default=existing_model)
+            if not default_model:
+                print_warning("A model name is required for custom providers.")
+
+    while not default_model:
+        print_warning("A model name is required.")
+        default_model = prompt("  Model name", default=existing_model)
 
     actual_name = provider_key if provider_key != "custom" else "openai"
 

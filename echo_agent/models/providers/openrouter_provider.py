@@ -11,7 +11,7 @@ class OpenRouterProvider(OpenAIProvider):
 
     _BASE_URL = "https://openrouter.ai/api/v1"
 
-    def __init__(self, api_key: str = "", api_base: str = "", default_model: str = "anthropic/claude-sonnet-4", **kwargs: Any):
+    def __init__(self, api_key: str = "", api_base: str = "", default_model: str = "", **kwargs: Any):
         extra_headers = kwargs.pop("extra_headers", {})
         extra_headers.setdefault("HTTP-Referer", kwargs.pop("referer", "https://github.com/echo-agent"))
         extra_headers.setdefault("X-Title", kwargs.pop("title", "Echo Agent"))

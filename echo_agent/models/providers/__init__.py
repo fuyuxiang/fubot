@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 from loguru import logger
@@ -21,6 +22,16 @@ _PROVIDER_MAP: dict[str, str] = {
     "openrouter": "echo_agent.models.providers.openrouter_provider.OpenRouterProvider",
 }
 
+_API_KEY_ENV: dict[str, tuple[str, ...]] = {
+    "openai": ("OPENAI_API_KEY",),
+    "anthropic": ("ANTHROPIC_API_KEY",),
+    "gemini": ("GOOGLE_API_KEY", "GEMINI_API_KEY"),
+    "google": ("GOOGLE_API_KEY", "GEMINI_API_KEY"),
+    "openrouter": ("OPENROUTER_API_KEY",),
+}
+
+_BEDROCK_PROVIDERS = {"bedrock", "aws"}
+
 
 def _import_class(dotted_path: str) -> type:
     module_path, class_name = dotted_path.rsplit(".", 1)
@@ -29,8 +40,65 @@ def _import_class(dotted_path: str) -> type:
     return getattr(module, class_name)
 
 
-def create_provider(config: ProviderConfig) -> LLMProvider:
+def _env_api_key(provider_name: str) -> str:
+    for env_name in _API_KEY_ENV.get(provider_name, ()):
+        value = os.environ.get(env_name, "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _has_aws_credentials() -> bool:
+    return bool(
+        os.environ.get("AWS_ACCESS_KEY_ID")
+        or os.environ.get("AWS_PROFILE")
+        or os.environ.get("AWS_WEB_IDENTITY_TOKEN_FILE")
+    )
+
+
+def _allows_keyless_openai_compatible(provider_name: str, config: ProviderConfig) -> bool:
+    if not config.api_base:
+        return False
+    return provider_name == "openai" or provider_name not in _PROVIDER_MAP
+
+
+def validate_provider_config(config: ProviderConfig, *, default_model: str = "") -> None:
+    provider_name = config.name.lower().strip()
+    if not provider_name:
+        raise ValueError("provider name is required")
+
+    if provider_name not in _PROVIDER_MAP and not config.api_base:
+        raise ValueError(
+            f"provider '{config.name}' is OpenAI-compatible by default and requires api_base"
+        )
+
+    if not config.models and not default_model:
+        raise ValueError(
+            f"provider '{config.name}' requires an explicit model; set models.defaultModel "
+            "or models.providers[].models"
+        )
+
+    if provider_name in _BEDROCK_PROVIDERS:
+        if config.api_key or _has_aws_credentials():
+            return
+        # boto3/AnthropicBedrock can still resolve instance/task role credentials at call time.
+        return
+
+    if config.api_key or config.credential_pool or _env_api_key(provider_name):
+        return
+
+    if _allows_keyless_openai_compatible(provider_name, config):
+        return
+
+    env_hint = ", ".join(_API_KEY_ENV.get(provider_name, ()))
+    hint = f" or set {env_hint}" if env_hint else ""
+    raise ValueError(f"provider '{config.name}' requires api_key{hint}")
+
+
+def create_provider(config: ProviderConfig, *, default_model: str = "") -> LLMProvider:
     name = config.name.lower().strip()
+    default_model = default_model.strip()
+    validate_provider_config(config, default_model=default_model)
     dotted = _PROVIDER_MAP.get(name)
 
     if dotted:
@@ -43,15 +111,16 @@ def create_provider(config: ProviderConfig) -> LLMProvider:
     kwargs: dict[str, Any] = {}
     if config.extra_headers:
         kwargs["extra_headers"] = config.extra_headers
-    if config.models:
-        kwargs["default_model"] = config.models[0]
+    configured_default = default_model or (config.models[0] if config.models else "")
+    if configured_default:
+        kwargs["default_model"] = configured_default
 
     pool: CredentialPool | None = None
     if config.credential_pool:
         pool = CredentialPool(config.credential_pool)
         api_key = pool.get_next()
     else:
-        api_key = config.api_key
+        api_key = config.api_key or _env_api_key(name)
 
     provider = cls(api_key=api_key, api_base=config.api_base, **kwargs)
 

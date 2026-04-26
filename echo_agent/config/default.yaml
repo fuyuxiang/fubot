@@ -24,7 +24,7 @@ channels:
     enabled: false
 
 models:
-  defaultModel: "gpt-4o"
+  defaultModel: ""
   providers: []
   routes: []
 

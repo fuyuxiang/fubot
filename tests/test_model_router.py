@@ -4,6 +4,7 @@ import pytest
 
 from echo_agent.config.schema import ModelRouteConfig, ModelsConfig, ProviderConfig
 from echo_agent.models.provider import LLMProvider, LLMResponse
+from echo_agent.models.providers import validate_provider_config
 from echo_agent.models.router import ModelRouter
 
 
@@ -51,3 +52,27 @@ async def test_router_returns_task_route_and_fallback_after_failure() -> None:
     second_name, _, second_decision = router.route_provider_with_fallback(task_type="code")
     assert second_name == "deep"
     assert second_decision.model == "deep-model"
+
+
+def test_provider_validation_requires_explicit_model() -> None:
+    with pytest.raises(ValueError, match="requires an explicit model"):
+        validate_provider_config(
+            ProviderConfig(name="openai", api_key="key"),
+            default_model="",
+        )
+
+
+def test_provider_validation_allows_local_openai_compatible_without_key() -> None:
+    validate_provider_config(
+        ProviderConfig(name="openai", api_base="http://127.0.0.1:11434/v1"),
+        default_model="local-model",
+    )
+
+
+def test_provider_validation_requires_key_for_remote_api(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    with pytest.raises(ValueError, match="requires api_key"):
+        validate_provider_config(
+            ProviderConfig(name="anthropic", models=["claude-model"]),
+            default_model="",
+        )

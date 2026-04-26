@@ -19,7 +19,7 @@ from echo_agent.models.provider import (
 
 class OpenAIProvider(LLMProvider):
 
-    def __init__(self, api_key: str = "", api_base: str = "", default_model: str = "gpt-4o", **kwargs: Any):
+    def __init__(self, api_key: str = "", api_base: str = "", default_model: str = "", **kwargs: Any):
         super().__init__(api_key=api_key, api_base=api_base)
         self._default_model = default_model
         self._extra_headers: dict[str, str] = kwargs.get("extra_headers", {})

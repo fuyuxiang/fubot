@@ -26,7 +26,7 @@ class VisionTool(Tool):
         "properties": {
             "image": {"type": "string", "description": "Path to a local image file or an image URL."},
             "prompt": {"type": "string", "description": "Question or instruction about the image."},
-            "model": {"type": "string", "description": "Override model for vision (e.g., 'gpt-4o'). Uses default if omitted."},
+            "model": {"type": "string", "description": "Override model for vision. Uses the configured default if omitted."},
         },
         "required": ["image", "prompt"],
     }

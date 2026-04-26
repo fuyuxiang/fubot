@@ -209,6 +209,11 @@ class AgentLoop:
         self.provider = provider
         self.router = router
         self.workspace = workspace
+        try:
+            provider_default_model = provider.get_default_model()
+        except Exception:
+            provider_default_model = ""
+        self._default_model = config.models.default_model or provider_default_model or ""
 
         self.sessions = SessionManager(
             sessions_dir=workspace / config.storage.sessions_dir,
@@ -228,15 +233,17 @@ class AgentLoop:
             config=config.compression,
             context_window_tokens=config.session.context_window_tokens,
             provider=provider,
-            default_model=config.models.default_model,
+            default_model=self._default_model,
         )
         try:
             from echo_agent.models.tokenizer import TokenCounter
-            provider_name = config.models.default_provider or "openai"
-            model_name = config.models.default_model or "gpt-4o"
-            tc = TokenCounter.for_model(provider_name, model_name)
-            if hasattr(self.compressor, 'set_token_counter'):
-                self.compressor.set_token_counter(tc)
+            provider_name = getattr(config.models, "default_provider", "") or ""
+            if not provider_name and config.models.providers:
+                provider_name = config.models.providers[0].name
+            if self._default_model:
+                tc = TokenCounter.for_model(provider_name, self._default_model)
+                if hasattr(self.compressor, 'set_token_counter'):
+                    self.compressor.set_token_counter(tc)
         except Exception:
             pass
         self.permissions = PermissionManager(admin_users=config.permissions.admin_users)
@@ -906,12 +913,12 @@ class AgentLoop:
             response = await self.provider.chat_stream_with_retry(
                 messages=messages,
                 tools=tools,
-                model=self.config.models.default_model,
+                model=self._default_model or None,
                 on_delta=on_delta,
             )
             return response, RouteDecision(
                 provider_name="default",
-                model=self.config.models.default_model,
+                model=self._default_model,
                 reason="router disabled",
             )
 
@@ -951,10 +958,10 @@ class AgentLoop:
         response = await self.provider.chat_stream_with_retry(
             messages=messages,
             tools=tools,
-            model=self.config.models.default_model,
+            model=self._default_model or None,
             on_delta=on_delta,
         )
-        return response, RouteDecision(provider_name="default", model=self.config.models.default_model, reason="router empty")
+        return response, RouteDecision(provider_name="default", model=self._default_model, reason="router empty")
 
     def _infer_task_type(self, text: str) -> str:
         lower = text.lower()
@@ -1045,7 +1052,7 @@ class AgentLoop:
             reviewer = SkillReviewer(
                 provider=self.provider,
                 store=self.skill_store,
-                model=self.config.models.default_model,
+                model=self._default_model,
             )
             actions = await reviewer.review(messages)
             if actions:
@@ -1059,7 +1066,7 @@ class AgentLoop:
             reviewer = MemoryReviewer(
                 provider=self.provider,
                 store=self.memory,
-                model=self.config.models.default_model,
+                model=self._default_model,
                 session_key=session_key,
             )
             actions = await reviewer.review(messages)

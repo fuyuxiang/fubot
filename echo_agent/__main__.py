@@ -69,7 +69,7 @@ async def _bootstrap(
 
     for pc in config.models.providers:
         try:
-            p = create_provider(pc)
+            p = create_provider(pc, default_model=config.models.default_model)
             router.register_provider(pc.name, p)
             if provider is None:
                 provider = p

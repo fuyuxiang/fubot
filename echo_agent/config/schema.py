@@ -195,7 +195,7 @@ class ModelRouteConfig(_Base):
 
 
 class ModelsConfig(_Base):
-    default_model: str = "gpt-4o"
+    default_model: str = ""
     providers: list[ProviderConfig] = Field(default_factory=list)
     routes: list[ModelRouteConfig] = Field(default_factory=list)
     cost_limit_daily_usd: float = 0.0

@@ -37,7 +37,7 @@ class BedrockProvider(LLMProvider):
 
     def __init__(self, api_key: str = "", api_base: str = "", default_model: str = "", **kwargs: Any):
         super().__init__(api_key=api_key, api_base=api_base)
-        self._default_model = default_model or "anthropic.claude-sonnet-4-20250514-v1:0"
+        self._default_model = default_model
         self._region = kwargs.get("region", "")
         self._profile = kwargs.get("profile", "")
         self._access_key, self._secret_key, region_from_key = _parse_aws_credentials(api_key)

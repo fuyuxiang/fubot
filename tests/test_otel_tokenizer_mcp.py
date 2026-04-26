@@ -441,7 +441,7 @@ class TestConfigDefaults:
     def test_config_instantiation(self):
         from echo_agent.config.schema import Config
         cfg = Config()
-        assert cfg.models.default_model == "gpt-4o"
+        assert cfg.models.default_model == ""
         assert cfg.workspace == "~/.echo-agent"
 
     def test_planning_config_defaults(self):
