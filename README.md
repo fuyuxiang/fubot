@@ -198,31 +198,7 @@ permissions:
 
 ## 架构
 
-```mermaid
-flowchart LR
-    subgraph 输入
-      CLI[CLI]
-      Channels[消息通道]
-      Cron[计划任务]
-      API[Gateway API / WebSocket]
-    end
-
-    输入 --> Bus[消息总线]
-    Bus --> Agent[Agent Loop]
-
-    Agent --> Context[上下文构建]
-    Agent --> Memory[记忆]
-    Agent --> Skills[技能]
-    Agent --> Tools[工具]
-    Agent --> MCP[MCP 适配器]
-    Agent --> Tasks[任务 / 工作流]
-    Agent --> Providers[LLM Providers]
-
-    Memory --> Storage[(SQLite)]
-    Skills --> Storage
-    Tasks --> Storage
-    Agent --> Observability[Trace / 健康检查]
-```
+![架构图](https://cdn.jsdelivr.net/gh/picturepub/img/img/202604271030056.png)
 
 ```text
 echo_agent/
