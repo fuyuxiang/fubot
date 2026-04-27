@@ -30,7 +30,7 @@ from echo_agent.models.provider import LLMProvider, LLMResponse, ToolCallRequest
 from echo_agent.models.router import ModelRouter, RouteDecision
 from echo_agent.observability.monitor import TraceLogger
 from echo_agent.permissions.manager import (
-    ApprovalManager, ApprovalStatus, CredentialManager, Effect, PermissionLevel, PermissionManager, PermissionRule,
+    ApprovalManager, ApprovalStatus, CredentialManager,
 )
 from echo_agent.runtime_paths import bundled_skills_dir
 from echo_agent.session.manager import Session, SessionManager
@@ -249,16 +249,6 @@ class AgentLoop:
                     self.compressor.set_token_counter(tc)
         except Exception:
             pass
-        self.permissions = PermissionManager(admin_users=config.permissions.admin_users)
-        for rule_cfg in config.permissions.rules:
-            self.permissions.add_rule(PermissionRule(
-                level=PermissionLevel(rule_cfg.level),
-                subject=rule_cfg.subject,
-                action=rule_cfg.action,
-                effect=Effect(rule_cfg.effect),
-                scope=rule_cfg.scope,
-                priority=rule_cfg.priority,
-            ))
         self.approval = ApprovalManager(
             require_approval=config.permissions.approval.require_approval,
             auto_approve=config.permissions.approval.auto_approve,
@@ -834,14 +824,11 @@ class AgentLoop:
     def _check_permission_and_approval(
         self, tool_name: str, arguments: dict[str, Any], sender_id: str,
     ) -> ToolResult | None:
-        """检查工具的权限和审批状态。
+        """检查工具的审批状态。
 
         Returns:
             ToolResult: 如果被拒绝或需要等待审批，返回拒绝结果；否则返回 None 表示通过。
         """
-        if not self.permissions.check_tool(tool_name, user_id=sender_id):
-            return ToolResult(success=False, error=f"Permission denied for tool '{tool_name}'")
-
         if not (self.inference.needs_confirmation(tool_name) or self.approval.needs_approval(tool_name)):
             return None
 
@@ -1013,7 +1000,7 @@ class AgentLoop:
         return f"Approval request {request_id} denied." if ok else f"Approval request not found: {request_id}"
 
     def _can_decide_approval(self, user_id: str, request: Any) -> bool:
-        if self.permissions.is_admin(user_id):
+        if user_id in (self.config.permissions.admin_users or []):
             return True
         if not self.config.permissions.admin_users:
             return not request.user_id or request.user_id == user_id

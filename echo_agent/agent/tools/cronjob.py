@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from echo_agent.agent.tools.base import Tool, ToolExecutionContext, ToolPermission, ToolResult
+from echo_agent.agent.tools.base import Tool, ToolExecutionContext, ToolResult
 from echo_agent.scheduler.delivery import target_from_session_key
 from echo_agent.scheduler.service import ScheduledJob, Scheduler, TriggerKind
 
@@ -25,7 +25,6 @@ class CronjobTool(Tool):
         },
         "required": ["action"],
     }
-    required_permissions = [ToolPermission.ADMIN]
 
     def __init__(self, scheduler: Scheduler | None):
         self._scheduler = scheduler

@@ -6,7 +6,7 @@ from typing import Any
 
 import aiohttp
 
-from echo_agent.agent.tools.base import Tool, ToolExecutionContext, ToolPermission, ToolResult
+from echo_agent.agent.tools.base import Tool, ToolExecutionContext, ToolResult
 
 
 class ImageGenTool(Tool):
@@ -21,7 +21,6 @@ class ImageGenTool(Tool):
         },
         "required": ["prompt"],
     }
-    required_permissions = [ToolPermission.NETWORK]
     timeout_seconds = 120
 
     def __init__(self, api_key: str = "", api_base: str = "", model: str = "dall-e-3"):

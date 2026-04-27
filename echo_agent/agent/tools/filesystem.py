@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from echo_agent.agent.tools.base import Tool, ToolExecutionContext, ToolPermission, ToolResult
+from echo_agent.agent.tools.base import Tool, ToolExecutionContext, ToolResult
 
 
 class _PathSafety:
@@ -67,7 +67,6 @@ class ReadFileTool(Tool):
         },
         "required": ["path"],
     }
-    required_permissions = [ToolPermission.READ]
 
     def __init__(self, workspace: str, restrict: bool = False):
         self._safety = _PathSafety(workspace, restrict)
@@ -104,7 +103,6 @@ class WriteFileTool(Tool):
         },
         "required": ["path", "content"],
     }
-    required_permissions = [ToolPermission.WRITE]
 
     def __init__(self, workspace: str, restrict: bool = False):
         self._safety = _PathSafety(workspace, restrict)
@@ -136,7 +134,6 @@ class EditFileTool(Tool):
         },
         "required": ["path", "old_string", "new_string"],
     }
-    required_permissions = [ToolPermission.WRITE]
 
     def __init__(self, workspace: str, restrict: bool = False):
         self._safety = _PathSafety(workspace, restrict)
@@ -171,7 +168,6 @@ class ListDirTool(Tool):
         },
         "required": ["path"],
     }
-    required_permissions = [ToolPermission.READ]
 
     def __init__(self, workspace: str, restrict: bool = False):
         self._safety = _PathSafety(workspace, restrict)

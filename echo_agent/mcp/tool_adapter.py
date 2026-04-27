@@ -7,7 +7,7 @@ from typing import Any
 
 from loguru import logger
 
-from echo_agent.agent.tools.base import Tool, ToolExecutionContext, ToolPermission, ToolResult
+from echo_agent.agent.tools.base import Tool, ToolExecutionContext, ToolResult
 from echo_agent.mcp.client import MCPClient
 
 
@@ -25,7 +25,6 @@ def _convert_mcp_schema(mcp_tool: dict[str, Any]) -> dict[str, Any]:
 
 class MCPToolAdapter(Tool):
 
-    required_permissions = [ToolPermission.NETWORK]
     timeout_seconds = 120
 
     def __init__(self, server_name: str, mcp_tool: dict[str, Any], client: MCPClient):

@@ -48,14 +48,7 @@ execution:
 permissions:
   adminUsers: []
   approval:
-    requireApproval:
-      - "exec"
-      - "execute_code"
-      - "write_file"
-      - "edit_file"
-      - "patch"
-      - "process"
-      - "knowledge_index"
+    requireApproval: []
     defaultPolicy: "approve"
 
 credentials:

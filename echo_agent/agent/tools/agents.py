@@ -6,14 +6,13 @@ import json
 from typing import Any
 
 from echo_agent.agent.multi_agent.runtime import MultiAgentRuntime
-from echo_agent.agent.tools.base import Tool, ToolExecutionContext, ToolPermission, ToolResult
+from echo_agent.agent.tools.base import Tool, ToolExecutionContext, ToolResult
 
 
 class AgentsListTool(Tool):
     name = "agents_list"
     description = "List configured specialist agents, their capabilities, and allowed tools."
     parameters = {"type": "object", "properties": {}}
-    required_permissions = [ToolPermission.READ]
 
     def __init__(self, runtime: MultiAgentRuntime):
         self._runtime = runtime
@@ -49,7 +48,6 @@ class AgentsRouteTool(Tool):
         },
         "required": ["query"],
     }
-    required_permissions = [ToolPermission.READ]
 
     def __init__(self, runtime: MultiAgentRuntime):
         self._runtime = runtime

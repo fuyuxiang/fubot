@@ -6,7 +6,7 @@ import difflib
 from pathlib import Path
 from typing import Any
 
-from echo_agent.agent.tools.base import Tool, ToolExecutionContext, ToolPermission, ToolResult
+from echo_agent.agent.tools.base import Tool, ToolExecutionContext, ToolResult
 
 
 class PatchTool(Tool):
@@ -21,7 +21,6 @@ class PatchTool(Tool):
         },
         "required": ["file_path", "patch"],
     }
-    required_permissions = [ToolPermission.WRITE]
     timeout_seconds = 15
 
     def __init__(self, workspace: str, restrict: bool = False):

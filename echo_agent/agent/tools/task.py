@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from echo_agent.agent.tools.base import Tool, ToolExecutionContext, ToolPermission, ToolResult
+from echo_agent.agent.tools.base import Tool, ToolExecutionContext, ToolResult
 from echo_agent.tasks.manager import TaskManager
 from echo_agent.tasks.models import TaskStatus
 
@@ -35,7 +35,6 @@ class TaskTool(Tool):
         },
         "required": ["action"],
     }
-    required_permissions = [ToolPermission.WRITE]
 
     def __init__(self, manager: TaskManager):
         self._mgr = manager

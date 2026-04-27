@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from echo_agent.agent.executors.base import BaseExecutor, ExecRequest
-from echo_agent.agent.tools.base import Tool, ToolExecutionContext, ToolPermission, ToolResult
+from echo_agent.agent.tools.base import Tool, ToolExecutionContext, ToolResult
 
 
 class ShellTool(Tool):
@@ -24,7 +24,6 @@ class ShellTool(Tool):
         },
         "required": ["command"],
     }
-    required_permissions = [ToolPermission.EXECUTE]
     timeout_seconds = 60
     _BUILTIN_BLOCKED_PATTERNS = [
         (re.compile(r"/etc/(passwd|shadow|sudoers|gshadow)\b"), "sensitive system account file"),

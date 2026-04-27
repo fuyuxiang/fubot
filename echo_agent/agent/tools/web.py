@@ -7,7 +7,7 @@ from urllib.parse import urljoin
 
 import aiohttp
 
-from echo_agent.agent.tools.base import Tool, ToolExecutionContext, ToolPermission, ToolResult
+from echo_agent.agent.tools.base import Tool, ToolExecutionContext, ToolResult
 
 
 class WebFetchTool(Tool):
@@ -21,7 +21,6 @@ class WebFetchTool(Tool):
         },
         "required": ["url"],
     }
-    required_permissions = [ToolPermission.NETWORK]
     timeout_seconds = 30
 
     def __init__(self, proxy: str | None = None):
@@ -65,7 +64,6 @@ class WebSearchTool(Tool):
         },
         "required": ["query"],
     }
-    required_permissions = [ToolPermission.NETWORK]
     timeout_seconds = 30
 
     def __init__(

@@ -281,15 +281,6 @@ class ExecutionConfig(_Base):
 
 # ── Permission configs ───────────────────────────────────────────────────────
 
-class PermissionRule(_Base):
-    level: Literal["user", "channel", "tool", "file", "workspace", "admin"] = "tool"
-    subject: str = "*"
-    action: str = "*"
-    effect: Literal["allow", "deny"] = "allow"
-    scope: str = "*"
-    priority: int = 0
-
-
 class ApprovalConfig(_Base):
     require_approval: list[str] = Field(default_factory=list)
     auto_approve: list[str] = Field(default_factory=list)
@@ -299,7 +290,6 @@ class ApprovalConfig(_Base):
 
 class PermissionsConfig(_Base):
     admin_users: list[str] = Field(default_factory=list)
-    rules: list[PermissionRule] = Field(default_factory=list)
     approval: ApprovalConfig = Field(default_factory=ApprovalConfig)
 
 

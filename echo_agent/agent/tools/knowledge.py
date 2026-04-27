@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from echo_agent.agent.tools.base import Tool, ToolExecutionContext, ToolPermission, ToolResult
+from echo_agent.agent.tools.base import Tool, ToolExecutionContext, ToolResult
 from echo_agent.knowledge.index import KnowledgeIndex
 
 
@@ -20,7 +20,6 @@ class KnowledgeSearchTool(Tool):
         },
         "required": ["query"],
     }
-    required_permissions = [ToolPermission.READ]
     timeout_seconds = 10
 
     def __init__(self, index: KnowledgeIndex, default_limit: int = 5):
@@ -67,7 +66,6 @@ class KnowledgeIndexTool(Tool):
         },
         "required": ["action"],
     }
-    required_permissions = [ToolPermission.ADMIN]
     timeout_seconds = 60
 
     def __init__(self, index: KnowledgeIndex):

@@ -6,7 +6,7 @@ import base64
 from pathlib import Path
 from typing import Any
 
-from echo_agent.agent.tools.base import Tool, ToolExecutionContext, ToolPermission, ToolResult
+from echo_agent.agent.tools.base import Tool, ToolExecutionContext, ToolResult
 from echo_agent.models.provider import LLMProvider
 
 
@@ -30,7 +30,6 @@ class VisionTool(Tool):
         },
         "required": ["image", "prompt"],
     }
-    required_permissions = [ToolPermission.READ, ToolPermission.NETWORK]
     timeout_seconds = 60
 
     def __init__(self, provider: LLMProvider, workspace: str = ""):

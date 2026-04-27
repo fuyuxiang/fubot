@@ -8,7 +8,7 @@ from typing import Any
 
 from loguru import logger
 
-from echo_agent.agent.tools.base import Tool, ToolExecutionContext, ToolPermission, ToolResult
+from echo_agent.agent.tools.base import Tool, ToolExecutionContext, ToolResult
 
 _PROCESSES: dict[str, dict[str, Any]] = {}
 
@@ -26,7 +26,6 @@ class ProcessTool(Tool):
         },
         "required": ["action"],
     }
-    required_permissions = [ToolPermission.EXECUTE]
     timeout_seconds = 10
 
     def __init__(self, workspace: str):

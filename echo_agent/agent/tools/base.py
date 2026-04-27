@@ -9,7 +9,6 @@ import uuid
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime
-from enum import Enum
 from typing import Any, Mapping
 
 
@@ -42,14 +41,6 @@ def _validate_json_schema(schema: Any, path: str = "parameters") -> None:
         if isinstance(variants, list):
             for index, entry in enumerate(variants):
                 _validate_json_schema(entry, f"{path}.{key}[{index}]")
-
-
-class ToolPermission(str, Enum):
-    READ = "read"
-    WRITE = "write"
-    EXECUTE = "execute"
-    NETWORK = "network"
-    ADMIN = "admin"
 
 
 @dataclass(frozen=True)
@@ -102,7 +93,6 @@ class Tool(ABC):
     name: str = ""
     description: str = ""
     parameters: dict[str, Any] = {}
-    required_permissions: list[ToolPermission] = []
     timeout_seconds: int = 30
     max_retries: int = 0
     stream_capable: bool = False

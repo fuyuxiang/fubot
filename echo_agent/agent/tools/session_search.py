@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from echo_agent.agent.tools.base import Tool, ToolExecutionContext, ToolPermission, ToolResult
+from echo_agent.agent.tools.base import Tool, ToolExecutionContext, ToolResult
 from echo_agent.session.manager import SessionManager
 
 
@@ -22,7 +22,6 @@ class SessionSearchTool(Tool):
         },
         "required": ["query"],
     }
-    required_permissions = [ToolPermission.READ]
 
     def __init__(self, session_manager: SessionManager):
         self._sessions = session_manager

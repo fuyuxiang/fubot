@@ -16,7 +16,7 @@ from typing import Any
 
 from loguru import logger
 
-from echo_agent.agent.tools.base import Tool, ToolExecutionContext, ToolPermission, ToolResult
+from echo_agent.agent.tools.base import Tool, ToolExecutionContext, ToolResult
 from echo_agent.skills.store import SkillStore, parse_frontmatter
 
 _TIMEOUT = 60
@@ -178,7 +178,6 @@ class SkillInstallTool(Tool):
         },
         "required": ["source", "location"],
     }
-    required_permissions = [ToolPermission.WRITE, ToolPermission.EXECUTE, ToolPermission.NETWORK]
 
     def __init__(self, store: SkillStore):
         self._store = store

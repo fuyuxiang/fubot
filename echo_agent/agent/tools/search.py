@@ -6,7 +6,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from echo_agent.agent.tools.base import Tool, ToolExecutionContext, ToolPermission, ToolResult
+from echo_agent.agent.tools.base import Tool, ToolExecutionContext, ToolResult
 
 
 class SearchFilesTool(Tool):
@@ -22,7 +22,6 @@ class SearchFilesTool(Tool):
         },
         "required": ["pattern"],
     }
-    required_permissions = [ToolPermission.READ]
     timeout_seconds = 30
 
     def __init__(self, workspace: str, restrict: bool = False):

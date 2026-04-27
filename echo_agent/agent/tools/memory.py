@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from echo_agent.agent.tools.base import Tool, ToolExecutionContext, ToolPermission, ToolResult
+from echo_agent.agent.tools.base import Tool, ToolExecutionContext, ToolResult
 from echo_agent.memory.store import MemoryEntry, MemoryStore, MemoryType
 
 
@@ -60,7 +60,6 @@ class MemoryTool(Tool):
         },
         "required": ["action"],
     }
-    required_permissions = [ToolPermission.WRITE]
 
     def __init__(self, store: MemoryStore):
         self._store = store

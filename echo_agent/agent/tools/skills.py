@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from echo_agent.agent.tools.base import Tool, ToolExecutionContext, ToolPermission, ToolResult
+from echo_agent.agent.tools.base import Tool, ToolExecutionContext, ToolResult
 from echo_agent.skills.store import SkillStore
 
 
@@ -20,7 +20,6 @@ class SkillsListTool(Tool):
         "Use this to discover what skills exist before viewing or managing them."
     )
     parameters = {"type": "object", "properties": {}, "required": []}
-    required_permissions = [ToolPermission.READ]
 
     def __init__(self, store: SkillStore):
         self._store = store
@@ -54,7 +53,6 @@ class SkillViewTool(Tool):
         },
         "required": ["name"],
     }
-    required_permissions = [ToolPermission.READ]
 
     def __init__(self, store: SkillStore):
         self._store = store
@@ -112,7 +110,6 @@ class SkillManageTool(Tool):
         },
         "required": ["action", "name"],
     }
-    required_permissions = [ToolPermission.WRITE]
 
     def __init__(self, store: SkillStore):
         self._store = store

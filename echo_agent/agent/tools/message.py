@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from echo_agent.agent.tools.base import Tool, ToolExecutionContext, ToolPermission, ToolResult
+from echo_agent.agent.tools.base import Tool, ToolExecutionContext, ToolResult
 from echo_agent.bus.events import OutboundEvent
 
 
@@ -20,7 +20,6 @@ class MessageTool(Tool):
         },
         "required": ["channel", "chat_id", "text"],
     }
-    required_permissions = [ToolPermission.WRITE]
 
     def __init__(self, publish_fn=None):
         self._publish = publish_fn

@@ -1,7 +1,6 @@
-"""Permission, approval, and credential management.
+"""Approval and credential management.
 
 Covers:
-  - Multi-level permissions (user, channel, tool, file, workspace, admin)
   - Pre-execution approval workflow (approve/deny/whitelist/blacklist)
   - Credential management (agent identity, token storage, isolation, rotation, audit)
 """
@@ -21,82 +20,11 @@ from typing import Any
 from loguru import logger
 
 
-class PermissionLevel(str, Enum):
-    USER = "user"
-    CHANNEL = "channel"
-    TOOL = "tool"
-    FILE = "file"
-    WORKSPACE = "workspace"
-    ADMIN = "admin"
-
-
-class Effect(str, Enum):
-    ALLOW = "allow"
-    DENY = "deny"
-
-
 class ApprovalStatus(str, Enum):
     PENDING = "pending"
     APPROVED = "approved"
     DENIED = "denied"
     EXPIRED = "expired"
-
-
-@dataclass
-class PermissionRule:
-    id: str = field(default_factory=lambda: uuid.uuid4().hex[:8])
-    level: PermissionLevel = PermissionLevel.USER
-    subject: str = "*"  # user_id, channel, tool_name, file_path, etc.
-    action: str = "*"   # read, write, execute, etc.
-    effect: Effect = Effect.ALLOW
-    scope: str = "*"    # workspace, global, etc.
-    priority: int = 0
-
-    def matches(self, level: PermissionLevel, subject: str, action: str) -> bool:
-        if self.level != level:
-            return False
-        if self.subject != "*" and self.subject != subject:
-            return False
-        if self.action != "*" and self.action != action:
-            return False
-        return True
-
-
-class PermissionManager:
-    """Evaluates permission rules across all levels."""
-
-    def __init__(self, admin_users: list[str] | None = None):
-        self._rules: list[PermissionRule] = []
-        self._admin_users = set(admin_users or [])
-
-    def add_rule(self, rule: PermissionRule) -> None:
-        self._rules.append(rule)
-        self._rules.sort(key=lambda r: r.priority, reverse=True)
-
-    def remove_rule(self, rule_id: str) -> bool:
-        before = len(self._rules)
-        self._rules = [r for r in self._rules if r.id != rule_id]
-        return len(self._rules) < before
-
-    def is_admin(self, user_id: str) -> bool:
-        return user_id in self._admin_users
-
-    def check(self, level: PermissionLevel, subject: str, action: str, user_id: str = "") -> Effect:
-        if user_id and self.is_admin(user_id):
-            return Effect.ALLOW
-        for rule in self._rules:
-            if rule.matches(level, subject, action):
-                return rule.effect
-        return Effect.ALLOW if not self._rules else Effect.DENY
-
-    def check_tool(self, tool_name: str, user_id: str = "") -> bool:
-        return self.check(PermissionLevel.TOOL, tool_name, "execute", user_id) == Effect.ALLOW
-
-    def check_file(self, path: str, action: str, user_id: str = "") -> bool:
-        return self.check(PermissionLevel.FILE, path, action, user_id) == Effect.ALLOW
-
-    def check_channel(self, channel: str, user_id: str) -> bool:
-        return self.check(PermissionLevel.CHANNEL, channel, "access", user_id) == Effect.ALLOW
 
 
 @dataclass

@@ -6,7 +6,7 @@ import asyncio
 import json
 from typing import Any, Awaitable, Callable
 
-from echo_agent.agent.tools.base import Tool, ToolExecutionContext, ToolPermission, ToolResult
+from echo_agent.agent.tools.base import Tool, ToolExecutionContext, ToolResult
 from echo_agent.bus.events import OutboundEvent
 from echo_agent.bus.queue import MessageBus
 
@@ -26,7 +26,6 @@ class ClarifyTool(Tool):
         },
         "required": ["question"],
     }
-    required_permissions = [ToolPermission.READ]
 
     def __init__(self, bus: MessageBus):
         self._bus = bus

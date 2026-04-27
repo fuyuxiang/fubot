@@ -7,7 +7,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from echo_agent.agent.tools.base import Tool, ToolExecutionContext, ToolPermission, ToolResult
+from echo_agent.agent.tools.base import Tool, ToolExecutionContext, ToolResult
 
 
 class TTSTool(Tool):
@@ -23,7 +23,6 @@ class TTSTool(Tool):
         },
         "required": ["text"],
     }
-    required_permissions = [ToolPermission.WRITE, ToolPermission.NETWORK]
     timeout_seconds = 60
 
     def __init__(self, workspace: str, openai_api_key: str = ""):

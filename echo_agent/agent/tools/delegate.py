@@ -11,7 +11,7 @@ from typing import Any
 
 from loguru import logger
 
-from echo_agent.agent.tools.base import Tool, ToolExecutionContext, ToolPermission, ToolResult
+from echo_agent.agent.tools.base import Tool, ToolExecutionContext, ToolResult
 from echo_agent.models.provider import LLMProvider
 
 
@@ -27,7 +27,6 @@ class DelegateTool(Tool):
         },
         "required": ["task"],
     }
-    required_permissions = [ToolPermission.EXECUTE]
     timeout_seconds = 300
 
     def __init__(self, provider: LLMProvider, tool_registry_factory: Any = None):
@@ -113,7 +112,6 @@ class SpawnTool(Tool):
         },
         "required": ["task"],
     }
-    required_permissions = [ToolPermission.EXECUTE]
 
     def __init__(self, provider: LLMProvider, bus: Any = None):
         self._provider = provider

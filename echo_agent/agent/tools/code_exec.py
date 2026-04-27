@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from echo_agent.agent.executors.base import BaseExecutor, ExecRequest
-from echo_agent.agent.tools.base import Tool, ToolExecutionContext, ToolPermission, ToolResult
+from echo_agent.agent.tools.base import Tool, ToolExecutionContext, ToolResult
 
 
 _RUNNERS: dict[str, str] = {
@@ -30,7 +30,6 @@ class CodeExecTool(Tool):
         },
         "required": ["code", "language"],
     }
-    required_permissions = [ToolPermission.EXECUTE]
     timeout_seconds = 60
     _SENSITIVE_PATTERNS = [
         re.compile(r"/etc/(passwd|shadow|sudoers|gshadow)\b"),

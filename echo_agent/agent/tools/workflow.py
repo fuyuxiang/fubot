@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from echo_agent.agent.tools.base import Tool, ToolExecutionContext, ToolPermission, ToolResult
+from echo_agent.agent.tools.base import Tool, ToolExecutionContext, ToolResult
 from echo_agent.tasks.workflow import WorkflowEngine
 
 
@@ -35,7 +35,6 @@ class WorkflowTool(Tool):
         },
         "required": ["action"],
     }
-    required_permissions = [ToolPermission.WRITE, ToolPermission.EXECUTE]
 
     def __init__(self, engine: WorkflowEngine):
         self._engine = engine
