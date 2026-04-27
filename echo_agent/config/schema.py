@@ -285,7 +285,7 @@ class ApprovalConfig(_Base):
     require_approval: list[str] = Field(default_factory=list)
     auto_approve: list[str] = Field(default_factory=list)
     auto_deny: list[str] = Field(default_factory=list)
-    default_policy: Literal["approve", "deny", "ask"] = "ask"
+    default_policy: Literal["approve", "deny", "ask"] = "approve"
 
 
 class PermissionsConfig(_Base):
