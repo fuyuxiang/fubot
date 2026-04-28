@@ -20,6 +20,7 @@ class TelegramChannelConfig(_Base):
     allow_from: list[str] = Field(default_factory=list)
     proxy: str | None = None
     group_policy: Literal["open", "mention"] = "mention"
+    reactions_enabled: bool = True
 
 
 class DiscordChannelConfig(_Base):
@@ -27,6 +28,7 @@ class DiscordChannelConfig(_Base):
     token: str = ""
     allow_from: list[str] = Field(default_factory=list)
     group_policy: Literal["open", "mention"] = "mention"
+    reactions_enabled: bool = True
 
 
 class WebhookChannelConfig(_Base):
@@ -50,6 +52,7 @@ class SlackChannelConfig(_Base):
     bot_token: str = ""
     app_token: str = ""
     allow_from: list[str] = Field(default_factory=list)
+    reactions_enabled: bool = True
 
 
 class WhatsAppChannelConfig(_Base):
@@ -136,6 +139,7 @@ class MatrixChannelConfig(_Base):
     user_id: str = ""
     access_token: str = ""
     allow_rooms: list[str] = Field(default_factory=list)
+    reactions_enabled: bool = True
 
 
 class ChannelsConfig(_Base):

@@ -1,7 +1,4 @@
-"""QQ Bot media helpers — type detection, tag parsing, upload cache, and API calls.
-
-Ported from the openclaw QQ bot extension (TypeScript) to Python.
-"""
+"""QQ Bot media helpers — type detection, tag parsing, upload cache, and API calls."""
 
 from __future__ import annotations
 

@@ -9,7 +9,7 @@ from typing import Any
 
 from loguru import logger
 
-from echo_agent.bus.events import OutboundEvent
+from echo_agent.bus.events import InboundEvent, OutboundEvent
 from echo_agent.bus.queue import MessageBus
 from echo_agent.channels.base import BaseChannel
 from echo_agent.channels.cli import CLIChannel
@@ -64,6 +64,17 @@ def register_channel_type(name: str, cls: type[BaseChannel]) -> None:
     _CHANNEL_REGISTRY[name] = cls
 
 
+_EMOJI_MAP: dict[str, dict[str, str]] = {
+    "processing": {"telegram": "\U0001f440", "discord": "\U0001f440", "slack": "eyes", "matrix": "\U0001f440"},
+    "success": {"telegram": "\U0001f44d", "discord": "✅", "slack": "white_check_mark", "matrix": "✅"},
+    "failure": {"telegram": "❌", "discord": "❌", "slack": "x", "matrix": "❌"},
+}
+
+
+def _emoji(channel_name: str, kind: str) -> str:
+    return _EMOJI_MAP.get(kind, {}).get(channel_name, "")
+
+
 class ChannelManager:
     """Manages the lifecycle of all enabled channel adapters."""
 
@@ -75,7 +86,9 @@ class ChannelManager:
         self._send_tool_hints = config.send_tool_hints
         self._on_cli_exit = on_cli_exit
         self._stream_states: dict[str, _StreamState] = {}
+        self._inbound_msg_ids: dict[str, tuple[str, str]] = {}
         self.bus.subscribe_outbound_global(self._filter_and_dispatch)
+        self.bus.subscribe_inbound(self._on_inbound_lifecycle)
 
     def get_channel(self, name: str) -> BaseChannel | None:
         return self._channels.get(name)
@@ -83,6 +96,28 @@ class ChannelManager:
     @property
     def active_channels(self) -> list[str]:
         return [name for name, ch in self._channels.items() if ch.is_running]
+
+    async def _on_inbound_lifecycle(self, event: InboundEvent) -> None:
+        channel = self._channels.get(event.channel)
+        if not channel:
+            return
+        if event.reply_to_id:
+            self._inbound_msg_ids[event.event_id] = (event.channel, event.reply_to_id)
+        try:
+            await channel.send_typing(event.chat_id, metadata=event.metadata)
+        except Exception as e:
+            logger.debug("send_typing failed on {}: {}", event.channel, e)
+        if event.reply_to_id:
+            try:
+                await channel.send_read_receipt(event.chat_id, event.reply_to_id, metadata=event.metadata)
+            except Exception as e:
+                logger.debug("send_read_receipt failed on {}: {}", event.channel, e)
+            emoji = _emoji(event.channel, "processing")
+            if emoji and getattr(getattr(channel, "config", None), "reactions_enabled", False):
+                try:
+                    await channel.send_reaction(event.chat_id, event.reply_to_id, emoji, metadata=event.metadata)
+                except Exception as e:
+                    logger.debug("send_reaction failed on {}: {}", event.channel, e)
 
     async def _filter_and_dispatch(self, event: OutboundEvent) -> None:
         if event.metadata.get("_token_stream"):
@@ -98,6 +133,38 @@ class ChannelManager:
             if not is_tool_hint and not self._send_progress:
                 event.metadata["_drop"] = True
                 return
+
+        if event.is_final and event.message_kind == "final":
+            await self._on_outbound_final(event)
+
+    async def _on_outbound_final(self, event: OutboundEvent) -> None:
+        channel = self._channels.get(event.channel)
+        if not channel:
+            return
+        try:
+            await channel.stop_typing(event.chat_id)
+        except Exception as e:
+            logger.debug("stop_typing failed on {}: {}", event.channel, e)
+        inbound_event_id = str(event.metadata.get("_inbound_event_id", ""))
+        mapping = self._inbound_msg_ids.pop(inbound_event_id, None)
+        if not mapping:
+            return
+        _, platform_msg_id = mapping
+        if not getattr(getattr(channel, "config", None), "reactions_enabled", False):
+            return
+        is_error = event.metadata.get("_error", False)
+        processing_emoji = _emoji(event.channel, "processing")
+        outcome_emoji = _emoji(event.channel, "failure" if is_error else "success")
+        if processing_emoji:
+            try:
+                await channel.remove_reaction(event.chat_id, platform_msg_id, processing_emoji)
+            except Exception as e:
+                logger.debug("remove_reaction failed on {}: {}", event.channel, e)
+        if outcome_emoji:
+            try:
+                await channel.send_reaction(event.chat_id, platform_msg_id, outcome_emoji)
+            except Exception as e:
+                logger.debug("send_reaction failed on {}: {}", event.channel, e)
 
     async def _handle_token_stream(self, event: OutboundEvent) -> None:
         channel = self._channels.get(event.channel)

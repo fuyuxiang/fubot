@@ -96,6 +96,87 @@ class SlackChannel(BaseChannel):
         error = str(result.get("error", "Slack chat.update failed")) if result else "Slack chat.update failed"
         return SendResult(success=False, message_id=message_id, error=error)
 
+    async def send_typing(self, chat_id: str, metadata: dict[str, Any] | None = None) -> None:
+        thread_ts = (metadata or {}).get("thread_ts")
+        if not thread_ts:
+            return
+        await self._api(
+            "assistant.threads.setStatus",
+            token=self._bot_token,
+            json_body={"channel_id": chat_id, "thread_ts": thread_ts, "status": "is thinking..."},
+        )
+
+    async def stop_typing(self, chat_id: str) -> None:
+        pass
+
+    async def send_reaction(self, chat_id: str, message_id: str, emoji: str, metadata: dict[str, Any] | None = None) -> SendResult:
+        if not getattr(self.config, "reactions_enabled", True):
+            return SendResult(success=False, error="reactions disabled")
+        result = await self._api(
+            "reactions.add",
+            token=self._bot_token,
+            json_body={"channel": chat_id, "timestamp": message_id, "name": emoji},
+        )
+        if result and result.get("ok"):
+            return SendResult(success=True)
+        error = str(result.get("error", "Slack reactions.add failed")) if result else "Slack reactions.add failed"
+        return SendResult(success=False, error=error)
+
+    async def remove_reaction(self, chat_id: str, message_id: str, emoji: str, metadata: dict[str, Any] | None = None) -> SendResult:
+        if not getattr(self.config, "reactions_enabled", True):
+            return SendResult(success=False, error="reactions disabled")
+        result = await self._api(
+            "reactions.remove",
+            token=self._bot_token,
+            json_body={"channel": chat_id, "timestamp": message_id, "name": emoji},
+        )
+        if result and result.get("ok"):
+            return SendResult(success=True)
+        error = str(result.get("error", "Slack reactions.remove failed")) if result else "Slack reactions.remove failed"
+        return SendResult(success=False, error=error)
+
+    async def delete_message(self, chat_id: str, message_id: str, metadata: dict[str, Any] | None = None) -> SendResult:
+        result = await self._api(
+            "chat.delete",
+            token=self._bot_token,
+            json_body={"channel": chat_id, "ts": message_id},
+        )
+        if result and result.get("ok"):
+            return SendResult(success=True)
+        error = str(result.get("error", "Slack chat.delete failed")) if result else "Slack chat.delete failed"
+        return SendResult(success=False, error=error)
+
+    async def send_voice(self, chat_id: str, audio_source: str, metadata: dict[str, Any] | None = None) -> SendResult:
+        from pathlib import Path
+        path = Path(audio_source)
+        if not path.exists() or not self._session:
+            return SendResult(success=False, error="audio file not found or no session")
+        try:
+            upload_result = await self._api(
+                "files.getUploadURLExternal",
+                token=self._bot_token,
+                json_body={"filename": path.name, "length": path.stat().st_size},
+            )
+            if not upload_result or not upload_result.get("ok"):
+                return SendResult(success=False, error="failed to get upload URL")
+            upload_url = upload_result["upload_url"]
+            file_id = upload_result["file_id"]
+            data = aiohttp.FormData()
+            data.add_field("file", path.open("rb"), filename=path.name)
+            async with self._session.post(upload_url, data=data) as resp:
+                if resp.status >= 400:
+                    return SendResult(success=False, error="upload failed")
+            complete_result = await self._api(
+                "files.completeUploadExternal",
+                token=self._bot_token,
+                json_body={"files": [{"id": file_id}], "channel_id": chat_id},
+            )
+            if complete_result and complete_result.get("ok"):
+                return SendResult(success=True)
+            return SendResult(success=False, error="Slack file upload complete failed")
+        except Exception as e:
+            return SendResult(success=False, error=str(e))
+
     # ── Socket Mode ──────────────────────────────────────────────────────────
 
     async def _ws_loop(self) -> None:

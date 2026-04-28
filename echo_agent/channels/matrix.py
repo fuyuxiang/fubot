@@ -11,8 +11,9 @@ from loguru import logger
 
 from echo_agent.bus.events import OutboundEvent
 from echo_agent.bus.queue import MessageBus
-from echo_agent.channels.base import BaseChannel
+from echo_agent.channels.base import BaseChannel, SendResult
 from echo_agent.config.schema import MatrixChannelConfig
+from echo_agent.bus.events import PollRequest
 
 
 class MatrixChannel(BaseChannel):
@@ -63,6 +64,119 @@ class MatrixChannel(BaseChannel):
                     logger.warning("Matrix send failed ({}): {}", resp.status, body[:200])
         except Exception as e:
             logger.error("Matrix send error: {}", e)
+
+    async def send_typing(self, chat_id: str, metadata: dict[str, Any] | None = None) -> None:
+        if not self._session:
+            return
+        url = f"{self._homeserver}/_matrix/client/v3/rooms/{chat_id}/typing/{self._user_id}"
+        try:
+            async with self._session.put(url, json={"typing": True, "timeout": 30000}) as resp:
+                if resp.status >= 400:
+                    logger.warning("Matrix typing failed ({})", resp.status)
+        except Exception as e:
+            logger.error("Matrix typing error: {}", e)
+
+    async def stop_typing(self, chat_id: str) -> None:
+        if not self._session:
+            return
+        url = f"{self._homeserver}/_matrix/client/v3/rooms/{chat_id}/typing/{self._user_id}"
+        try:
+            async with self._session.put(url, json={"typing": False}) as resp:
+                if resp.status >= 400:
+                    logger.warning("Matrix stop typing failed ({})", resp.status)
+        except Exception as e:
+            logger.error("Matrix stop typing error: {}", e)
+
+    async def send_reaction(self, chat_id: str, message_id: str, emoji: str, metadata: dict[str, Any] | None = None) -> SendResult:
+        if not getattr(self.config, "reactions_enabled", True) or not self._session:
+            return SendResult(success=False, error="reactions disabled or no session")
+        txn_id = f"r{id(emoji)}{asyncio.get_event_loop().time():.0f}"
+        url = f"{self._homeserver}/_matrix/client/v3/rooms/{chat_id}/send/m.reaction/{txn_id}"
+        payload = {
+            "m.relates_to": {
+                "rel_type": "m.annotation",
+                "event_id": message_id,
+                "key": emoji,
+            }
+        }
+        try:
+            async with self._session.put(url, json=payload) as resp:
+                if resp.status >= 400:
+                    body = await resp.text()
+                    return SendResult(success=False, error=body[:200])
+                data = await resp.json()
+                return SendResult(success=True, message_id=data.get("event_id", ""))
+        except Exception as e:
+            return SendResult(success=False, error=str(e))
+
+    async def send_read_receipt(self, chat_id: str, message_id: str, metadata: dict[str, Any] | None = None) -> None:
+        if not self._session or not message_id:
+            return
+        url = f"{self._homeserver}/_matrix/client/v3/rooms/{chat_id}/receipt/m.read/{message_id}"
+        try:
+            async with self._session.post(url, json={}) as resp:
+                if resp.status >= 400:
+                    logger.warning("Matrix read receipt failed ({})", resp.status)
+        except Exception as e:
+            logger.error("Matrix read receipt error: {}", e)
+
+    async def delete_message(self, chat_id: str, message_id: str, metadata: dict[str, Any] | None = None) -> SendResult:
+        if not self._session:
+            return SendResult(success=False, error="no session")
+        txn_id = f"d{id(message_id)}{asyncio.get_event_loop().time():.0f}"
+        url = f"{self._homeserver}/_matrix/client/v3/rooms/{chat_id}/redact/{message_id}/{txn_id}"
+        try:
+            async with self._session.put(url, json={}) as resp:
+                if resp.status >= 400:
+                    body = await resp.text()
+                    return SendResult(success=False, error=body[:200])
+                return SendResult(success=True)
+        except Exception as e:
+            return SendResult(success=False, error=str(e))
+
+    async def send_poll(self, chat_id: str, poll: PollRequest, metadata: dict[str, Any] | None = None) -> SendResult:
+        if not self._session:
+            return SendResult(success=False, error="no session")
+        txn_id = f"p{id(poll)}{asyncio.get_event_loop().time():.0f}"
+        url = f"{self._homeserver}/_matrix/client/v3/rooms/{chat_id}/send/m.poll.start/{txn_id}"
+        answers = [{"id": str(i), "org.matrix.msc3381.v2.text": o} for i, o in enumerate(poll.options)]
+        payload = {
+            "org.matrix.msc3381.v2.poll": {
+                "kind": "org.matrix.msc3381.v2.disclosed",
+                "max_selections": len(poll.options) if poll.allow_multiple else 1,
+                "question": {"org.matrix.msc3381.v2.text": poll.question},
+                "answers": answers,
+            }
+        }
+        try:
+            async with self._session.put(url, json=payload) as resp:
+                if resp.status >= 400:
+                    body = await resp.text()
+                    return SendResult(success=False, error=body[:200])
+                data = await resp.json()
+                return SendResult(success=True, message_id=data.get("event_id", ""))
+        except Exception as e:
+            return SendResult(success=False, error=str(e))
+
+    async def send_voice(self, chat_id: str, audio_source: str, metadata: dict[str, Any] | None = None) -> SendResult:
+        if not self._session:
+            return SendResult(success=False, error="no session")
+        txn_id = f"v{id(audio_source)}{asyncio.get_event_loop().time():.0f}"
+        url = f"{self._homeserver}/_matrix/client/v3/rooms/{chat_id}/send/m.room.message/{txn_id}"
+        payload = {
+            "msgtype": "m.audio",
+            "body": "voice message",
+            "url": audio_source,
+        }
+        try:
+            async with self._session.put(url, json=payload) as resp:
+                if resp.status >= 400:
+                    body = await resp.text()
+                    return SendResult(success=False, error=body[:200])
+                data = await resp.json()
+                return SendResult(success=True, message_id=data.get("event_id", ""))
+        except Exception as e:
+            return SendResult(success=False, error=str(e))
 
     async def _sync_loop(self) -> None:
         initial = await self._do_sync(timeout_ms=0)

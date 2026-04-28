@@ -10,7 +10,7 @@ from typing import Any
 import aiohttp
 from loguru import logger
 
-from echo_agent.bus.events import InboundEvent, OutboundEvent, ContentBlock, ContentType
+from echo_agent.bus.events import InboundEvent, OutboundEvent, ContentBlock, ContentType, PollRequest
 from echo_agent.bus.queue import MessageBus
 
 
@@ -61,6 +61,30 @@ class BaseChannel(ABC):
     ) -> SendResult:
         """Edit an existing platform message when the channel supports it."""
         return SendResult(success=False, error=f"channel {self.name} does not support message editing")
+
+    async def send_typing(self, chat_id: str, metadata: dict[str, Any] | None = None) -> None:
+        pass
+
+    async def stop_typing(self, chat_id: str) -> None:
+        pass
+
+    async def send_reaction(self, chat_id: str, message_id: str, emoji: str, metadata: dict[str, Any] | None = None) -> SendResult:
+        return SendResult(success=False, error=f"channel {self.name} does not support reactions")
+
+    async def remove_reaction(self, chat_id: str, message_id: str, emoji: str, metadata: dict[str, Any] | None = None) -> SendResult:
+        return SendResult(success=False, error=f"channel {self.name} does not support reactions")
+
+    async def send_poll(self, chat_id: str, poll: PollRequest, metadata: dict[str, Any] | None = None) -> SendResult:
+        return SendResult(success=False, error=f"channel {self.name} does not support polls")
+
+    async def delete_message(self, chat_id: str, message_id: str, metadata: dict[str, Any] | None = None) -> SendResult:
+        return SendResult(success=False, error=f"channel {self.name} does not support message deletion")
+
+    async def send_read_receipt(self, chat_id: str, message_id: str, metadata: dict[str, Any] | None = None) -> None:
+        pass
+
+    async def send_voice(self, chat_id: str, audio_source: str, metadata: dict[str, Any] | None = None) -> SendResult:
+        return SendResult(success=False, error=f"channel {self.name} does not support voice messages")
 
     def is_allowed(self, sender_id: str) -> bool:
         allow_list = getattr(self.config, "allow_from", [])

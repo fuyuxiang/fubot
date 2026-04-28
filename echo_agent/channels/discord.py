@@ -38,6 +38,7 @@ class DiscordChannel(BaseChannel):
         self._session_id: str = ""
         self._bot_id: str = ""
         self._resume_url: str = ""
+        self._typing_tasks: dict[str, asyncio.Task] = {}
 
     async def start(self) -> None:
         self._session = aiohttp.ClientSession(headers={
@@ -50,6 +51,9 @@ class DiscordChannel(BaseChannel):
 
     async def stop(self) -> None:
         self._running = False
+        for task in self._typing_tasks.values():
+            task.cancel()
+        self._typing_tasks.clear()
         if self._heartbeat_task:
             self._heartbeat_task.cancel()
         if self._ws_task:
@@ -114,6 +118,92 @@ class DiscordChannel(BaseChannel):
         except Exception as e:
             logger.error("Discord edit error: {}", e)
             return SendResult(success=False, message_id=message_id, error=str(e))
+
+    async def send_typing(self, chat_id: str, metadata: dict[str, Any] | None = None) -> None:
+        if not self._session or chat_id in self._typing_tasks:
+            return
+
+        async def _typing_loop() -> None:
+            try:
+                while self._running and self._session:
+                    async with self._session.post(f"{_API_BASE}/channels/{chat_id}/typing") as resp:
+                        if resp.status >= 400:
+                            break
+                    await asyncio.sleep(8)
+            except asyncio.CancelledError:
+                pass
+
+        self._typing_tasks[chat_id] = asyncio.create_task(_typing_loop())
+
+    async def stop_typing(self, chat_id: str) -> None:
+        task = self._typing_tasks.pop(chat_id, None)
+        if task:
+            task.cancel()
+
+    async def send_reaction(self, chat_id: str, message_id: str, emoji: str, metadata: dict[str, Any] | None = None) -> SendResult:
+        if not getattr(self.config, "reactions_enabled", True) or not self._session:
+            return SendResult(success=False, error="reactions disabled or no session")
+        from urllib.parse import quote
+        encoded_emoji = quote(emoji)
+        url = f"{_API_BASE}/channels/{chat_id}/messages/{message_id}/reactions/{encoded_emoji}/@me"
+        try:
+            async with self._session.put(url) as resp:
+                if resp.status >= 400:
+                    body = await resp.text()
+                    return SendResult(success=False, error=body[:200])
+                return SendResult(success=True)
+        except Exception as e:
+            return SendResult(success=False, error=str(e))
+
+    async def remove_reaction(self, chat_id: str, message_id: str, emoji: str, metadata: dict[str, Any] | None = None) -> SendResult:
+        if not getattr(self.config, "reactions_enabled", True) or not self._session:
+            return SendResult(success=False, error="reactions disabled or no session")
+        from urllib.parse import quote
+        encoded_emoji = quote(emoji)
+        url = f"{_API_BASE}/channels/{chat_id}/messages/{message_id}/reactions/{encoded_emoji}/@me"
+        try:
+            async with self._session.delete(url) as resp:
+                if resp.status >= 400:
+                    body = await resp.text()
+                    return SendResult(success=False, error=body[:200])
+                return SendResult(success=True)
+        except Exception as e:
+            return SendResult(success=False, error=str(e))
+
+    async def delete_message(self, chat_id: str, message_id: str, metadata: dict[str, Any] | None = None) -> SendResult:
+        if not self._session:
+            return SendResult(success=False, error="no session")
+        url = f"{_API_BASE}/channels/{chat_id}/messages/{message_id}"
+        try:
+            async with self._session.delete(url) as resp:
+                if resp.status >= 400:
+                    body = await resp.text()
+                    return SendResult(success=False, error=body[:200])
+                return SendResult(success=True)
+        except Exception as e:
+            return SendResult(success=False, error=str(e))
+
+    async def send_voice(self, chat_id: str, audio_source: str, metadata: dict[str, Any] | None = None) -> SendResult:
+        if not self._session:
+            return SendResult(success=False, error="no session")
+        url = f"{_API_BASE}/channels/{chat_id}/messages"
+        try:
+            from pathlib import Path
+            path = Path(audio_source)
+            if path.exists():
+                data = aiohttp.FormData()
+                data.add_field("files[0]", path.open("rb"), filename=path.name, content_type="audio/ogg")
+                data.add_field("payload_json", json.dumps({"flags": 8192}))
+                async with self._session.post(url, data=data) as resp:
+                    if resp.status >= 400:
+                        body = await resp.text()
+                        return SendResult(success=False, error=body[:200])
+                    result = await resp.json()
+                    return SendResult(success=True, message_id=str(result.get("id", "")))
+            else:
+                return SendResult(success=False, error="audio file not found")
+        except Exception as e:
+            return SendResult(success=False, error=str(e))
 
     # ── WebSocket lifecycle ──────────────────────────────────────────────────
 

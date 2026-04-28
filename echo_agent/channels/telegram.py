@@ -13,6 +13,7 @@ from echo_agent.bus.queue import MessageBus
 from echo_agent.channels.base import BaseChannel, SendResult
 from echo_agent.config.schema import TelegramChannelConfig
 from echo_agent.utils.text import split_message
+from echo_agent.bus.events import PollRequest
 
 _API = "https://api.telegram.org/bot{token}/{method}"
 _MAX_TEXT = 4096
@@ -97,6 +98,62 @@ class TelegramChannel(BaseChannel):
             "parse_mode": "HTML",
         })
         return self._send_result(result, "Telegram editMessageText failed", fallback_message_id=message_id)
+
+    async def send_typing(self, chat_id: str, metadata: dict[str, Any] | None = None) -> None:
+        await self._api("sendChatAction", json={"chat_id": chat_id, "action": "typing"})
+
+    async def send_reaction(self, chat_id: str, message_id: str, emoji: str, metadata: dict[str, Any] | None = None) -> SendResult:
+        if not getattr(self.config, "reactions_enabled", True):
+            return SendResult(success=False, error="reactions disabled")
+        result = await self._api("setMessageReaction", json={
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "reaction": [{"type": "emoji", "emoji": emoji}],
+        })
+        if result is not None:
+            return SendResult(success=True)
+        return SendResult(success=False, error="Telegram setMessageReaction failed")
+
+    async def remove_reaction(self, chat_id: str, message_id: str, emoji: str, metadata: dict[str, Any] | None = None) -> SendResult:
+        if not getattr(self.config, "reactions_enabled", True):
+            return SendResult(success=False, error="reactions disabled")
+        result = await self._api("setMessageReaction", json={
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "reaction": [],
+        })
+        if result is not None:
+            return SendResult(success=True)
+        return SendResult(success=False, error="Telegram remove reaction failed")
+
+    async def send_poll(self, chat_id: str, poll: PollRequest, metadata: dict[str, Any] | None = None) -> SendResult:
+        payload: dict[str, Any] = {
+            "chat_id": chat_id,
+            "question": poll.question,
+            "options": [{"text": o} for o in poll.options],
+            "is_anonymous": False,
+            "allows_multiple_answers": poll.allow_multiple,
+        }
+        if poll.duration_seconds and 5 <= poll.duration_seconds <= 600:
+            payload["open_period"] = poll.duration_seconds
+        result = await self._api("sendPoll", json=payload)
+        return self._send_result(result, "Telegram sendPoll failed")
+
+    async def delete_message(self, chat_id: str, message_id: str, metadata: dict[str, Any] | None = None) -> SendResult:
+        result = await self._api("deleteMessage", json={
+            "chat_id": chat_id,
+            "message_id": message_id,
+        })
+        if result is not None:
+            return SendResult(success=True)
+        return SendResult(success=False, error="Telegram deleteMessage failed")
+
+    async def send_voice(self, chat_id: str, audio_source: str, metadata: dict[str, Any] | None = None) -> SendResult:
+        result = await self._api("sendVoice", json={
+            "chat_id": chat_id,
+            "voice": audio_source,
+        })
+        return self._send_result(result, "Telegram sendVoice failed")
 
     async def _poll_loop(self) -> None:
         while self._running:

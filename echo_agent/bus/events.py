@@ -27,7 +27,21 @@ class ContentType(str, Enum):
     FILE = "file"
     AUDIO = "audio"
     VIDEO = "video"
+    VOICE = "voice"
     MIXED = "mixed"
+
+
+class ProcessingOutcome(str, Enum):
+    SUCCESS = "success"
+    FAILURE = "failure"
+
+
+@dataclass
+class PollRequest:
+    question: str
+    options: list[str]
+    allow_multiple: bool = False
+    duration_seconds: int | None = None
 
 
 @dataclass
