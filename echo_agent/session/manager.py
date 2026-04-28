@@ -37,9 +37,19 @@ class Session:
         self.updated_at = datetime.now()
 
     def get_history(self, max_messages: int = 500) -> list[dict[str, Any]]:
-        """Return unconsolidated messages for LLM input, aligned to a user turn."""
+        """Return unconsolidated messages for LLM input, aligned to a safe boundary.
+
+        Ensures no orphaned tool-result messages appear without their
+        preceding assistant(tool_calls) message.
+        """
         unconsolidated = self.messages[self.last_consolidated:]
         sliced = unconsolidated[-max_messages:]
+        # Skip orphaned tool results at the start — their paired
+        # assistant(tool_calls) was already consolidated.
+        start = 0
+        while start < len(sliced) and sliced[start].get("role") == "tool":
+            start += 1
+        sliced = sliced[start:]
         for i, m in enumerate(sliced):
             if m.get("role") == "user":
                 return sliced[i:]

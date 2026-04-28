@@ -1102,8 +1102,20 @@ class AgentLoop:
         try:
             chunk = session.messages[session.last_consolidated:]
             if await self.consolidator.consolidate_chunk(chunk):
-                session.last_consolidated = len(session.messages)
-                await self.sessions.save(session)
+                boundary = len(session.messages)
+                # Walk backward so we never split an assistant(tool_calls)
+                # from its following tool-result messages.
+                while boundary > session.last_consolidated:
+                    msg = session.messages[boundary - 1]
+                    if msg.get("role") == "tool":
+                        boundary -= 1
+                    elif msg.get("role") == "assistant" and msg.get("tool_calls"):
+                        boundary -= 1
+                    else:
+                        break
+                if boundary > session.last_consolidated:
+                    session.last_consolidated = boundary
+                    await self.sessions.save(session)
             if self.config.memory.sleep_consolidation:
                 try:
                     stats = await self.consolidator.sleep_consolidate(session.key, chunk)
