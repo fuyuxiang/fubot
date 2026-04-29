@@ -56,6 +56,17 @@ class OpenAIProvider(LLMProvider):
             return LLMResponse(content=f"Error: {e}", finish_reason="error")
         return self._parse_response(resp)
 
+    async def embed(self, text: str, model: str | None = None) -> list[float] | None:
+        try:
+            resp = await self._client.embeddings.create(
+                input=text,
+                model=model or "text-embedding-3-small",
+            )
+            return resp.data[0].embedding
+        except Exception as e:
+            logger.warning("Embedding API error: {}", e)
+            return None
+
     async def chat_stream(
         self,
         messages: list[dict[str, Any]],

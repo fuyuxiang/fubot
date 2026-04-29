@@ -16,8 +16,6 @@ import pytest_asyncio
 from echo_agent.memory.types import (
     Contradiction,
     Episode,
-    GraphEdge,
-    GraphNode,
     MemoryEntry,
     MemoryTier,
     MemoryType,
@@ -31,8 +29,6 @@ from echo_agent.memory.tiers import (
 )
 from echo_agent.memory.retrieval import HybridRetriever
 from echo_agent.memory.contradiction import ContradictionDetector
-from echo_agent.memory.graph import MemoryGraph
-from echo_agent.memory.prefetch import PredictivePrefetch
 from echo_agent.memory.store import MemoryStore, _scan_memory_content
 from echo_agent.memory.consolidator import MemoryConsolidator
 from echo_agent.memory.vectors import VectorIndex
@@ -140,24 +136,6 @@ class TestEpisodeSerialization:
         restored = Episode.from_dict(d)
         assert restored.id == "ep1"
         assert restored.entity_ids == ["e1"]
-
-
-class TestGraphNodeSerialization:
-    def test_roundtrip(self):
-        node = GraphNode(id="n1", label="Python", node_type="tech", properties={"v": "3.12"})
-        d = node.to_dict()
-        restored = GraphNode.from_dict(d)
-        assert restored.label == "Python"
-        assert restored.properties == {"v": "3.12"}
-
-
-class TestGraphEdgeSerialization:
-    def test_roundtrip(self):
-        edge = GraphEdge(id="e1", source_id="n1", target_id="n2", relation="uses", weight=0.9)
-        d = edge.to_dict()
-        restored = GraphEdge.from_dict(d)
-        assert restored.relation == "uses"
-        assert restored.weight == 0.9
 
 
 class TestContradictionSerialization:
@@ -370,7 +348,6 @@ class TestHybridRetriever:
         return HybridRetriever(
             entries_fn=lambda: entries,
             vector_index=None,
-            graph=None,
         )
 
     def test_query_entropy_single_token(self):
@@ -406,16 +383,14 @@ class TestHybridRetriever:
     def test_resonance_score_low_entropy(self):
         retriever = self._make_retriever([])
         entry = _make_entry(importance=1.0, last_accessed="")
-        score = retriever._resonance_score(entry, keyword_score=1.0, vector_score=0.0, graph_centrality=0.0, query_entropy=0.0)
-        # Low entropy => keyword weight = 0.4, vector = 0.3
-        assert score == pytest.approx(0.4 * 1.0 + 0.3 * 0.0 + 0.0, abs=0.01)
+        score = retriever._resonance_score(entry, keyword_score=1.0, vector_score=0.0, query_entropy=0.0)
+        assert score == pytest.approx(0.5 * 1.0, abs=0.01)
 
     def test_resonance_score_high_entropy(self):
         retriever = self._make_retriever([])
         entry = _make_entry(importance=1.0, last_accessed="")
-        score = retriever._resonance_score(entry, keyword_score=0.0, vector_score=0.0, graph_centrality=1.0, query_entropy=1.0)
-        # High entropy => graph weight = 0.3
-        assert score == pytest.approx(0.3 * 1.0, abs=0.01)
+        score = retriever._resonance_score(entry, keyword_score=0.0, vector_score=1.0, query_entropy=1.0)
+        assert score == pytest.approx(1.0 * 1.0, abs=0.01)
 
     @pytest.mark.asyncio
     async def test_retrieve_keyword_only(self):
@@ -490,21 +465,21 @@ class TestContradictionDetector:
         detector = ContradictionDetector(storage)
         # Ensure table exists
         await storage.execute_sql(
-            "CREATE TABLE IF NOT EXISTS contradictions "
+            "CREATE TABLE IF NOT EXISTS memory_contradictions "
             "(id TEXT PRIMARY KEY, memory_id_a TEXT, memory_id_b TEXT, "
             "description TEXT, resolution TEXT, resolved_at TEXT, created_at TEXT)",
             [],
         )
         c = Contradiction(id="c1", memory_id_a="a", memory_id_b="b", description="conflict")
         await detector.store_contradiction(c)
-        rows = await storage.fetch_sql("SELECT * FROM contradictions WHERE id = ?", ("c1",))
+        rows = await storage.fetch_sql("SELECT * FROM memory_contradictions WHERE id = ?", ("c1",))
         assert len(rows) == 1
 
     @pytest.mark.asyncio
     async def test_get_unresolved(self, storage: SQLiteBackend):
         detector = ContradictionDetector(storage)
         await storage.execute_sql(
-            "CREATE TABLE IF NOT EXISTS contradictions "
+            "CREATE TABLE IF NOT EXISTS memory_contradictions "
             "(id TEXT PRIMARY KEY, memory_id_a TEXT, memory_id_b TEXT, "
             "description TEXT, resolution TEXT, resolved_at TEXT, created_at TEXT)",
             [],
@@ -513,139 +488,6 @@ class TestContradictionDetector:
         await detector.store_contradiction(c)
         unresolved = await detector.get_unresolved()
         assert any(u.id == "c2" for u in unresolved)
-
-
-# ===========================================================================
-# 7. graph.py
-# ===========================================================================
-
-class TestMemoryGraph:
-    @pytest.mark.asyncio
-    async def test_add_node(self, storage: SQLiteBackend):
-        graph = MemoryGraph(storage)
-        node = await graph.add_node("Python", node_type="language")
-        assert node.label == "Python"
-        assert node.node_type == "language"
-
-    @pytest.mark.asyncio
-    async def test_add_node_dedup(self, storage: SQLiteBackend):
-        graph = MemoryGraph(storage)
-        n1 = await graph.add_node("Python")
-        n2 = await graph.add_node("python")  # case-insensitive
-        assert n1.id == n2.id
-
-    @pytest.mark.asyncio
-    async def test_add_edge(self, storage: SQLiteBackend):
-        graph = MemoryGraph(storage)
-        edge = await graph.add_edge("Python", "Django", "has_framework")
-        assert edge.relation == "has_framework"
-        # Nodes should be auto-created
-        py = await graph.get_node_by_label("Python")
-        dj = await graph.get_node_by_label("Django")
-        assert py is not None
-        assert dj is not None
-
-    @pytest.mark.asyncio
-    async def test_get_neighbors(self, storage: SQLiteBackend):
-        graph = MemoryGraph(storage)
-        await graph.add_edge("Python", "Django", "has_framework")
-        await graph.add_edge("Django", "REST", "supports")
-        neighbors = await graph.get_neighbors("Python", max_depth=2)
-        labels = [n.label for n, _, _ in neighbors]
-        assert "Django" in labels
-
-    @pytest.mark.asyncio
-    async def test_find_nodes(self, storage: SQLiteBackend):
-        graph = MemoryGraph(storage)
-        await graph.add_node("Python")
-        await graph.add_node("PyTorch")
-        results = await graph.find_nodes("py")
-        assert len(results) == 2
-
-    @pytest.mark.asyncio
-    async def test_pagerank(self, storage: SQLiteBackend):
-        graph = MemoryGraph(storage)
-        await graph.add_edge("A", "B", "links")
-        await graph.add_edge("B", "C", "links")
-        await graph.add_edge("C", "A", "links")
-        scores = await graph.pagerank(iterations=20)
-        assert len(scores) == 3
-        # In a cycle, scores should be roughly equal
-        vals = list(scores.values())
-        assert max(vals) - min(vals) < 0.1
-
-    @pytest.mark.asyncio
-    async def test_pagerank_empty(self, storage: SQLiteBackend):
-        graph = MemoryGraph(storage)
-        scores = await graph.pagerank()
-        assert scores == {}
-
-
-# ===========================================================================
-# 8. prefetch.py
-# ===========================================================================
-
-class TestPredictivePrefetch:
-    @pytest.mark.asyncio
-    async def test_prefetch_loads_memories(self):
-        entries = [
-            _make_entry(id="m1", key="python", content="python programming"),
-            _make_entry(id="m2", key="testing", content="pytest framework"),
-        ]
-        retriever = HybridRetriever(entries_fn=lambda: entries)
-
-        async def mock_predict_llm(**kwargs):
-            return _FakeLLMResponse(
-                tool_calls=[_FakeToolCall("1", "predict_topics", {"topics": ["python"]})]
-            )
-
-        prefetch = PredictivePrefetch(retriever=retriever, llm_call=mock_predict_llm)
-        wm = WorkingMemory()
-        messages = [
-            {"role": "user", "content": "tell me about python"},
-            {"role": "assistant", "content": "Python is a language"},
-        ]
-        loaded = await prefetch.prefetch(messages, wm)
-        assert loaded >= 1
-        assert wm.count >= 1
-
-    @pytest.mark.asyncio
-    async def test_prefetch_too_few_messages(self):
-        retriever = HybridRetriever(entries_fn=lambda: [])
-
-        async def mock_llm(**kwargs):
-            return _FakeLLMResponse()
-
-        prefetch = PredictivePrefetch(retriever=retriever, llm_call=mock_llm)
-        wm = WorkingMemory()
-        loaded = await prefetch.prefetch([{"role": "user", "content": "hi"}], wm)
-        assert loaded == 0
-
-    @pytest.mark.asyncio
-    async def test_prefetch_llm_failure(self):
-        retriever = HybridRetriever(entries_fn=lambda: [])
-
-        async def failing_llm(**kwargs):
-            raise RuntimeError("LLM down")
-
-        prefetch = PredictivePrefetch(retriever=retriever, llm_call=failing_llm)
-        wm = WorkingMemory()
-        messages = [{"role": "user", "content": "a"}, {"role": "assistant", "content": "b"}]
-        loaded = await prefetch.prefetch(messages, wm)
-        assert loaded == 0
-
-    @pytest.mark.asyncio
-    async def test_prefetch_no_tool_calls(self):
-        retriever = HybridRetriever(entries_fn=lambda: [])
-
-        async def no_tool_llm(**kwargs):
-            return _FakeLLMResponse(content="no tools", tool_calls=[])
-
-        prefetch = PredictivePrefetch(retriever=retriever, llm_call=no_tool_llm)
-        wm = WorkingMemory()
-        messages = [{"role": "user", "content": "a"}, {"role": "assistant", "content": "b"}]
-        loaded = await prefetch.prefetch(messages, wm)
-        assert loaded == 0
 
 
 # ===========================================================================
@@ -802,3 +644,405 @@ class TestMemoryConsolidator:
         consolidator = MemoryConsolidator(store, mock_llm)
         result = await consolidator.consolidate_chunk([])
         assert result is True  # empty messages => early return True
+
+
+# ===========================================================================
+# 10. Vector pipeline: VectorIndex source_map, add, search, initialize
+# ===========================================================================
+
+class TestVectorIndexWithFaiss:
+    @pytest.mark.asyncio
+    async def test_add_and_search_returns_source_id(self, storage: SQLiteBackend):
+        vi = VectorIndex(storage, dimensions=4)
+        await vi.initialize()
+        if not vi.available:
+            pytest.skip("FAISS not installed")
+        vec_id = await vi.add("mem_abc", [1.0, 0.0, 0.0, 0.0])
+        assert vec_id != ""
+        assert vi.count == 1
+        results = await vi.search([1.0, 0.0, 0.0, 0.0], limit=5)
+        assert len(results) == 1
+        source_id, score = results[0]
+        assert source_id == "mem_abc"
+        assert score > 0.9
+
+    @pytest.mark.asyncio
+    async def test_search_ranks_by_similarity(self, storage: SQLiteBackend):
+        vi = VectorIndex(storage, dimensions=4)
+        await vi.initialize()
+        if not vi.available:
+            pytest.skip("FAISS not installed")
+        await vi.add("python", [1.0, 0.0, 0.0, 0.0])
+        await vi.add("cooking", [0.0, 1.0, 0.0, 0.0])
+        await vi.add("music", [0.0, 0.0, 1.0, 0.0])
+        results = await vi.search([0.9, 0.1, 0.0, 0.0], limit=3)
+        assert results[0][0] == "python"
+
+    @pytest.mark.asyncio
+    async def test_initialize_restores_source_map(self, storage: SQLiteBackend):
+        vi = VectorIndex(storage, dimensions=4)
+        await vi.initialize()
+        if not vi.available:
+            pytest.skip("FAISS not installed")
+        await vi.add("entry_1", [1.0, 0.0, 0.0, 0.0])
+        await vi.add("entry_2", [0.0, 1.0, 0.0, 0.0])
+        assert vi.count == 2
+
+        vi2 = VectorIndex(storage, dimensions=4)
+        await vi2.initialize()
+        assert vi2.count == 2
+        results = await vi2.search([1.0, 0.0, 0.0, 0.0], limit=5)
+        assert any(sid == "entry_1" for sid, _ in results)
+
+    @pytest.mark.asyncio
+    async def test_rebuild_clears_and_reloads(self, storage: SQLiteBackend):
+        vi = VectorIndex(storage, dimensions=4)
+        await vi.initialize()
+        if not vi.available:
+            pytest.skip("FAISS not installed")
+        await vi.add("e1", [1.0, 0.0, 0.0, 0.0])
+        assert vi.count == 1
+        await vi.rebuild()
+        assert vi.count == 1
+        results = await vi.search([1.0, 0.0, 0.0, 0.0], limit=5)
+        assert results[0][0] == "e1"
+
+
+# ===========================================================================
+# 11. Store embedding pipeline: queue, flush, integration
+# ===========================================================================
+
+class TestStoreEmbeddingPipeline:
+    @pytest.mark.asyncio
+    async def test_add_queues_embed(self, tmp_path: Path, storage: SQLiteBackend):
+        store = MemoryStore(memory_dir=tmp_path / "mem", storage=storage)
+        vi = VectorIndex(storage, dimensions=4)
+        await vi.initialize()
+        store.set_vector_index(vi)
+
+        async def fake_embed(text):
+            return [1.0, 0.0, 0.0, 0.0]
+
+        store.set_embed_fn(fake_embed)
+        store.add(MemoryEntry(type=MemoryType.USER, key="k1", content="hello"))
+        assert len(store._pending_embeds) == 1
+
+    @pytest.mark.asyncio
+    async def test_flush_generates_embeddings(self, tmp_path: Path, storage: SQLiteBackend):
+        store = MemoryStore(memory_dir=tmp_path / "mem", storage=storage)
+        vi = VectorIndex(storage, dimensions=4)
+        await vi.initialize()
+        if not vi.available:
+            pytest.skip("FAISS not installed")
+        store.set_vector_index(vi)
+
+        async def fake_embed(text):
+            return [1.0, 0.0, 0.0, 0.0]
+
+        store.set_embed_fn(fake_embed)
+        entry = store.add(MemoryEntry(type=MemoryType.USER, key="k1", content="hello"))
+        count = await store.flush_pending_embeds()
+        assert count == 1
+        assert vi.count == 1
+        assert entry.embedding_id != ""
+        assert len(store._pending_embeds) == 0
+
+    @pytest.mark.asyncio
+    async def test_flush_skips_deleted_entries(self, tmp_path: Path, storage: SQLiteBackend):
+        store = MemoryStore(memory_dir=tmp_path / "mem", storage=storage)
+        vi = VectorIndex(storage, dimensions=4)
+        await vi.initialize()
+        if not vi.available:
+            pytest.skip("FAISS not installed")
+        store.set_vector_index(vi)
+
+        async def fake_embed(text):
+            return [1.0, 0.0, 0.0, 0.0]
+
+        store.set_embed_fn(fake_embed)
+        entry = store.add(MemoryEntry(type=MemoryType.USER, key="k1", content="hello"))
+        store.delete(entry.id)
+        count = await store.flush_pending_embeds()
+        assert count == 0
+
+    @pytest.mark.asyncio
+    async def test_update_queues_embed_on_content_change(self, tmp_path: Path, storage: SQLiteBackend):
+        store = MemoryStore(memory_dir=tmp_path / "mem", storage=storage)
+        vi = VectorIndex(storage, dimensions=4)
+        await vi.initialize()
+        store.set_vector_index(vi)
+
+        async def fake_embed(text):
+            return [1.0, 0.0, 0.0, 0.0]
+
+        store.set_embed_fn(fake_embed)
+        entry = store.add(MemoryEntry(type=MemoryType.USER, key="k1", content="hello"))
+        store._pending_embeds.clear()
+        store.update(entry.id, content="updated content")
+        assert len(store._pending_embeds) == 1
+
+    @pytest.mark.asyncio
+    async def test_no_queue_without_embed_fn(self, tmp_path: Path):
+        store = MemoryStore(memory_dir=tmp_path / "mem")
+        store.add(MemoryEntry(type=MemoryType.USER, key="k1", content="hello"))
+        assert len(store._pending_embeds) == 0
+
+    @pytest.mark.asyncio
+    async def test_flush_empty_returns_zero(self, tmp_path: Path):
+        store = MemoryStore(memory_dir=tmp_path / "mem")
+        count = await store.flush_pending_embeds()
+        assert count == 0
+
+
+# ===========================================================================
+# 12. Hybrid retrieval with vector search end-to-end
+# ===========================================================================
+
+class TestHybridRetrieverWithVectors:
+    @pytest.mark.asyncio
+    async def test_vector_search_boosts_ranking(self, storage: SQLiteBackend):
+        vi = VectorIndex(storage, dimensions=4)
+        await vi.initialize()
+        if not vi.available:
+            pytest.skip("FAISS not installed")
+
+        entries = [
+            _make_entry(id="py", key="python", content="python programming"),
+            _make_entry(id="cook", key="cooking", content="italian cooking"),
+        ]
+        embed_map = {"py": [1.0, 0.0, 0.0, 0.0], "cook": [0.0, 1.0, 0.0, 0.0]}
+        for eid, vec in embed_map.items():
+            await vi.add(eid, vec)
+
+        async def fake_embed(text):
+            if "python" in text.lower():
+                return [1.0, 0.0, 0.0, 0.0]
+            return [0.0, 1.0, 0.0, 0.0]
+
+        retriever = HybridRetriever(
+            entries_fn=lambda: entries,
+            vector_index=vi,
+            embed_fn=fake_embed,
+        )
+        results = await retriever.retrieve("python", limit=5)
+        assert len(results) >= 1
+        assert results[0][0].id == "py"
+
+    @pytest.mark.asyncio
+    async def test_vector_only_query_finds_results(self, storage: SQLiteBackend):
+        """Query with no keyword overlap should still find results via vector similarity."""
+        vi = VectorIndex(storage, dimensions=4)
+        await vi.initialize()
+        if not vi.available:
+            pytest.skip("FAISS not installed")
+
+        entries = [
+            _make_entry(id="py", key="python", content="python programming language"),
+        ]
+        await vi.add("py", [1.0, 0.0, 0.0, 0.0])
+
+        async def fake_embed(text):
+            return [0.9, 0.1, 0.0, 0.0]
+
+        retriever = HybridRetriever(
+            entries_fn=lambda: entries,
+            vector_index=vi,
+            embed_fn=fake_embed,
+        )
+        results = await retriever.retrieve("coding scripting", limit=5)
+        assert len(results) >= 1
+        assert results[0][0].id == "py"
+
+    def test_resonance_score_mid_entropy(self):
+        retriever = HybridRetriever(entries_fn=lambda: [])
+        entry = _make_entry(importance=1.0, last_accessed="")
+        score = retriever._resonance_score(
+            entry, keyword_score=1.0, vector_score=1.0, query_entropy=0.5,
+        )
+        w_kw = 0.5 * (1 - 0.5)
+        w_vec = 0.5 + 0.5 * 0.5
+        expected = w_kw * 1.0 + w_vec * 1.0
+        assert score == pytest.approx(expected, abs=0.01)
+
+
+# ===========================================================================
+# 13. Consolidator contradiction detection integration
+# ===========================================================================
+
+class TestConsolidatorContradictionDetection:
+    @pytest.mark.asyncio
+    async def test_sleep_consolidate_runs_contradiction_step(self, tmp_path: Path, storage: SQLiteBackend):
+        """Verify the contradiction detection step executes during sleep consolidation."""
+        store = MemoryStore(memory_dir=tmp_path / "mem", storage=storage)
+
+        async def mock_llm(**kwargs):
+            tools = kwargs.get("tools", [])
+            if tools:
+                tool_name = tools[0]["function"]["name"]
+                if tool_name == "save_memory":
+                    return _FakeLLMResponse(tool_calls=[
+                        _FakeToolCall("1", "save_memory", {
+                            "history_entry": "[2024-01-01] test",
+                            "memory_update": "# Memory",
+                        })
+                    ])
+                return _FakeLLMResponse(tool_calls=[_FakeToolCall("1", tool_name, {})])
+            return _FakeLLMResponse(
+                content='[{"type":"user","key":"lang","content":"Python","importance":0.8}]'
+            )
+
+        consolidator = MemoryConsolidator(store, mock_llm, consolidation_threshold=1)
+        episodic = EpisodicManager(storage)
+        semantic = SemanticManager(store)
+        consolidator.set_episodic_manager(episodic)
+        consolidator.set_semantic_manager(semantic)
+
+        # Pre-populate a USER entry with different session so store.add won't merge
+        existing = MemoryEntry(
+            type=MemoryType.USER, key="lang", content="Java",
+            importance=0.8, source_session="old_session",
+        )
+        store.add(existing)
+
+        detector = ContradictionDetector(storage)
+        consolidator.set_contradiction_detector(detector)
+
+        messages = [
+            {"role": "user", "content": "I use Python now", "timestamp": "2024-01-01T00:00"},
+            {"role": "assistant", "content": "Noted", "timestamp": "2024-01-01T00:01"},
+        ]
+        stats = await consolidator.sleep_consolidate("sess1", messages)
+        # promoted entry has source_session="" (from promote_from_episodic),
+        # existing has source_session="old_session" — different scope, so no merge.
+        # Both have key="lang" with different content → contradiction detected.
+        assert stats["promoted"] >= 1
+        assert stats["contradictions"] >= 1
+
+    @pytest.mark.asyncio
+    async def test_sleep_consolidate_no_contradiction_same_content(self, tmp_path: Path, storage: SQLiteBackend):
+        """No contradiction when promoted entry has same content as existing."""
+        store = MemoryStore(memory_dir=tmp_path / "mem", storage=storage)
+
+        async def mock_llm(**kwargs):
+            tools = kwargs.get("tools", [])
+            if tools:
+                tool_name = tools[0]["function"]["name"]
+                if tool_name == "save_memory":
+                    return _FakeLLMResponse(tool_calls=[
+                        _FakeToolCall("1", "save_memory", {
+                            "history_entry": "[2024-01-01] test",
+                            "memory_update": "# Memory",
+                        })
+                    ])
+                return _FakeLLMResponse(tool_calls=[_FakeToolCall("1", tool_name, {})])
+            return _FakeLLMResponse(
+                content='[{"type":"user","key":"lang","content":"Python","importance":0.8}]'
+            )
+
+        consolidator = MemoryConsolidator(store, mock_llm, consolidation_threshold=1)
+        episodic = EpisodicManager(storage)
+        semantic = SemanticManager(store)
+        consolidator.set_episodic_manager(episodic)
+        consolidator.set_semantic_manager(semantic)
+
+        existing = MemoryEntry(
+            type=MemoryType.USER, key="lang", content="Python",
+            importance=0.8, source_session="old_session",
+        )
+        store.add(existing)
+
+        detector = ContradictionDetector(storage)
+        consolidator.set_contradiction_detector(detector)
+
+        messages = [
+            {"role": "user", "content": "I use Python", "timestamp": "2024-01-01T00:00"},
+            {"role": "assistant", "content": "OK", "timestamp": "2024-01-01T00:01"},
+        ]
+        stats = await consolidator.sleep_consolidate("sess1", messages)
+        assert stats["contradictions"] == 0
+
+    @pytest.mark.asyncio
+    async def test_sleep_consolidate_no_contradiction_without_detector(self, tmp_path: Path, storage: SQLiteBackend):
+        store = MemoryStore(memory_dir=tmp_path / "mem", storage=storage)
+
+        async def mock_llm(**kwargs):
+            tools = kwargs.get("tools", [])
+            if tools:
+                tool_name = tools[0]["function"]["name"]
+                if tool_name == "save_memory":
+                    return _FakeLLMResponse(tool_calls=[
+                        _FakeToolCall("1", "save_memory", {
+                            "history_entry": "[2024-01-01] test",
+                            "memory_update": "# Memory",
+                        })
+                    ])
+                return _FakeLLMResponse(tool_calls=[_FakeToolCall("1", tool_name, {})])
+            return _FakeLLMResponse(
+                content='[{"type":"environment","key":"fact","content":"test","importance":0.5}]'
+            )
+
+        consolidator = MemoryConsolidator(store, mock_llm, consolidation_threshold=1)
+        episodic = EpisodicManager(storage)
+        semantic = SemanticManager(store)
+        consolidator.set_episodic_manager(episodic)
+        consolidator.set_semantic_manager(semantic)
+
+        messages = [
+            {"role": "user", "content": "hello", "timestamp": "2024-01-01T00:00"},
+            {"role": "assistant", "content": "hi", "timestamp": "2024-01-01T00:01"},
+        ]
+        stats = await consolidator.sleep_consolidate("sess1", messages)
+        assert stats["contradictions"] == 0
+
+
+# ===========================================================================
+# 14. Provider embed() method
+# ===========================================================================
+
+class TestProviderEmbed:
+    @pytest.mark.asyncio
+    async def test_base_provider_embed_returns_none(self):
+        from echo_agent.models.provider import LLMProvider
+
+        class DummyProvider(LLMProvider):
+            async def chat(self, messages, **kw):
+                pass
+            def get_default_model(self):
+                return "dummy"
+
+        provider = DummyProvider()
+        result = await provider.embed("hello")
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_openai_provider_embed_calls_api(self):
+        from echo_agent.models.providers.openai_provider import OpenAIProvider
+
+        mock_embedding = MagicMock()
+        mock_embedding.embedding = [0.1, 0.2, 0.3]
+        mock_response = MagicMock()
+        mock_response.data = [mock_embedding]
+
+        provider = OpenAIProvider(api_key="test-key", default_model="gpt-4o")
+        provider._client = MagicMock()
+        provider._client.embeddings = MagicMock()
+        provider._client.embeddings.create = AsyncMock(return_value=mock_response)
+
+        result = await provider.embed("hello world", model="text-embedding-3-small")
+        assert result == [0.1, 0.2, 0.3]
+        provider._client.embeddings.create.assert_called_once_with(
+            input="hello world",
+            model="text-embedding-3-small",
+        )
+
+    @pytest.mark.asyncio
+    async def test_openai_provider_embed_handles_error(self):
+        from echo_agent.models.providers.openai_provider import OpenAIProvider
+
+        provider = OpenAIProvider(api_key="test-key", default_model="gpt-4o")
+        provider._client = MagicMock()
+        provider._client.embeddings = MagicMock()
+        provider._client.embeddings.create = AsyncMock(side_effect=RuntimeError("API down"))
+
+        result = await provider.embed("hello")
+        assert result is None

@@ -150,17 +150,46 @@ class MemoryStore:
             forget_threshold=0.01,
         )
         self._vector_index = None  # set externally via set_vector_index()
-        self._graph = None  # set externally via set_graph()
         self._retriever = None  # set externally via set_retriever()
+        self._embed_fn = None  # async callable: str -> list[float]
+        self._pending_embeds: list[tuple[str, str]] = []  # (entry_id, text) pairs awaiting embedding
 
     def set_vector_index(self, index):
         self._vector_index = index
 
-    def set_graph(self, graph):
-        self._graph = graph
+    def set_embed_fn(self, fn):
+        self._embed_fn = fn
 
     def set_retriever(self, retriever):
         self._retriever = retriever
+
+    def _queue_embed(self, entry: MemoryEntry) -> None:
+        if self._embed_fn and self._vector_index:
+            text = f"{entry.key} {entry.content}" if entry.key else entry.content
+            self._pending_embeds.append((entry.id, text))
+
+    async def flush_pending_embeds(self) -> int:
+        """Generate embeddings for queued entries and add to vector index. Returns count."""
+        if not self._pending_embeds or not self._embed_fn or not self._vector_index:
+            return 0
+        batch = list(self._pending_embeds)
+        self._pending_embeds.clear()
+        count = 0
+        for entry_id, text in batch:
+            if entry_id not in self._entries:
+                continue
+            try:
+                embedding = await self._embed_fn(text)
+                if embedding:
+                    vec_id = await self._vector_index.add(entry_id, embedding)
+                    if vec_id:
+                        self._entries[entry_id].embedding_id = vec_id
+                        count += 1
+            except Exception as e:
+                logger.debug("Embedding generation failed for {}: {}", entry_id, e)
+        if count:
+            logger.info("Generated {} embeddings", count)
+        return count
 
     @property
     def forgetting_curve(self) -> ForgettingCurve:
@@ -362,6 +391,7 @@ class MemoryStore:
 
             self._entries[entry.id] = entry
             self._save_type(entry.type)
+            self._queue_embed(entry)
             return entry
 
     def update(
@@ -389,6 +419,8 @@ class MemoryStore:
                 entry.tags = normalized_tags
             entry.updated_at = datetime.now().isoformat()
             self._save_type(entry.type)
+            if normalized_content is not None:
+                self._queue_embed(entry)
             return entry
 
     def delete(self, entry_id: str) -> bool:

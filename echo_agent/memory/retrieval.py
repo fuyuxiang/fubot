@@ -1,16 +1,15 @@
-"""Hybrid retrieval — BM25 + vector + graph + Resonance Scoring."""
+"""Hybrid retrieval — BM25 + vector + Resonance Scoring."""
 
 from __future__ import annotations
 
 import math
 import re
 from collections import Counter
-from typing import Any, Callable, Awaitable, TYPE_CHECKING
+from typing import Callable, Awaitable, TYPE_CHECKING
 
 from loguru import logger
 
 if TYPE_CHECKING:
-    from echo_agent.memory.graph import MemoryGraph
     from echo_agent.memory.vectors import VectorIndex
 
 from echo_agent.memory.types import MemoryEntry, MemoryType
@@ -31,28 +30,22 @@ _TOKEN_RE = re.compile(r"[a-z0-9]+")
 class HybridRetriever:
     """Multi-signal retrieval with query-adaptive Resonance Scoring.
 
-    Innovation: Instead of static weight blending, the weights adapt per-query
-    based on query entropy (Shannon entropy of token distribution).
-    - High entropy (vague/broad query) -> upweight graph traversal
+    Weights adapt per-query based on query entropy (Shannon entropy of token distribution).
+    - High entropy (vague/broad query) -> upweight vector similarity
     - Low entropy (specific query) -> upweight keyword match
-    - Medium -> balanced blend with vector similarity dominant
     """
 
     def __init__(
         self,
         entries_fn: Callable[[], list[MemoryEntry]],
         vector_index: VectorIndex | None = None,
-        graph: MemoryGraph | None = None,
         forgetting: ForgettingCurve | None = None,
         embed_fn: Callable[[str], Awaitable[list[float]]] | None = None,
     ):
         self._entries_fn = entries_fn
         self._vector_index = vector_index
-        self._graph = graph
         self._forgetting = forgetting or ForgettingCurve()
         self._embed_fn = embed_fn
-        self._pagerank_cache: dict[str, float] = {}
-        self._pagerank_stale = True
 
     async def retrieve(
         self, query: str, limit: int = 10,
@@ -84,18 +77,10 @@ class HybridRetriever:
         vector_scores: dict[str, float] = {}
         if self._vector_index and self._embed_fn:
             vector_scores = {eid: sc for eid, sc in await self._vector_search(query, pool) if eid in entry_map}
-        graph_map: dict[str, float] = {}
-        if self._graph:
-            await self._ensure_pagerank()
-            for memory_id in await self._graph_expand(query, pool):
-                if memory_id in entry_map:
-                    graph_map[memory_id] = self._pagerank_cache.get(memory_id, 0.0)
 
-        # Normalize each signal to [0, 1] and compute resonance
-        all_ids = set(keyword_scores) | set(vector_scores) | set(graph_map)
+        all_ids = set(keyword_scores) | set(vector_scores)
         kw_max = max(keyword_scores.values(), default=1.0) or 1.0
         vec_max = max(vector_scores.values(), default=1.0) or 1.0
-        gr_max = max(graph_map.values(), default=1.0) or 1.0
         scored: list[tuple[MemoryEntry, float]] = []
         for memory_id in all_ids:
             entry = entry_map.get(memory_id)
@@ -103,8 +88,7 @@ class HybridRetriever:
                 continue
             score = self._resonance_score(
                 entry, keyword_scores.get(memory_id, 0.0) / kw_max,
-                vector_scores.get(memory_id, 0.0) / vec_max,
-                graph_map.get(memory_id, 0.0) / gr_max, entropy,
+                vector_scores.get(memory_id, 0.0) / vec_max, entropy,
             )
             if score > 0:
                 scored.append((entry, score))
@@ -112,10 +96,6 @@ class HybridRetriever:
         scored.sort(key=lambda x: x[1], reverse=True)
         logger.debug("hybrid retrieve: {} candidates, entropy={:.3f}", len(scored), entropy)
         return scored[:limit]
-
-    def invalidate_pagerank(self) -> None:
-        """Mark PageRank cache as stale (call after graph mutations)."""
-        self._pagerank_stale = True
 
     # -- tokenizer -----------------------------------------------------------
 
@@ -165,33 +145,7 @@ class HybridRetriever:
         except Exception:
             logger.warning("embed_fn failed for vector search")
             return []
-        results: list[tuple[str, float]] = []
-        for vec_id, score in await self._vector_index.search(embedding, limit):
-            row = await self._vector_index._storage.load_vector(vec_id)
-            if row and row.get("source_id"):
-                results.append((row["source_id"], score))
-        return results
-
-    # -- graph expansion -----------------------------------------------------
-
-    async def _graph_expand(self, query: str, limit: int) -> list[str]:
-        """Find entities mentioned in query, BFS neighbors, collect memory IDs."""
-        if not self._graph:
-            return []
-        tokens = self._tokenize(query)
-        query_lower = query.lower()
-        nodes = await self._graph.get_all_nodes()
-        matched: list[str] = [n.label for n in nodes if n.label.lower() in query_lower]
-        for token in tokens:
-            for n in await self._graph.find_nodes(token, limit=3):
-                if n.label not in matched:
-                    matched.append(n.label)
-        memory_ids: set[str] = set()
-        for label in matched[:5]:
-            for _node, edge, _depth in await self._graph.get_neighbors(label, max_depth=2):
-                if edge.source_memory_id:
-                    memory_ids.add(edge.source_memory_id)
-        return list(memory_ids)[:limit]
+        return await self._vector_index.search(embedding, limit)
 
     # -- query entropy -------------------------------------------------------
 
@@ -209,39 +163,14 @@ class HybridRetriever:
 
     # -- resonance scoring ---------------------------------------------------
 
-    # 共振评分 (Resonance Scoring) 权重自适应算法:
-    # - 关键词权重 = 0.4 × (1 - 查询熵): 查询越具体，关键词匹配越重要
-    # - 向量权重 = 0.3 + 0.1 × 查询熵: 语义相似度始终保持基础权重
-    # - 图谱权重 = 0.3 × 查询熵: 查询越模糊，知识图谱扩展越重要
-    # 最终分数乘以遗忘曲线衰减值，确保近期高频访问的记忆排名更高
-
     def _resonance_score(
         self, entry: MemoryEntry, keyword_score: float,
-        vector_score: float, graph_centrality: float, query_entropy: float,
+        vector_score: float, query_entropy: float,
     ) -> float:
         """Query-adaptive Resonance Scoring — weights shift with entropy."""
         e = max(0.0, min(1.0, query_entropy))
-        w_keyword = 0.4 * (1 - e)
-        w_vector = 0.3 + 0.1 * e
-        w_graph = 0.3 * e
-        raw = w_keyword * keyword_score + w_vector * vector_score + w_graph * graph_centrality
+        w_keyword = 0.5 * (1 - e)
+        w_vector = 0.5 + 0.5 * e
+        raw = w_keyword * keyword_score + w_vector * vector_score
         return raw * self._forgetting.effective_importance(entry)
 
-    # -- PageRank cache ------------------------------------------------------
-
-    async def _ensure_pagerank(self) -> None:
-        if not self._pagerank_stale or not self._graph:
-            return
-        try:
-            node_scores = await self._graph.pagerank()
-            self._pagerank_cache.clear()
-            for edge in await self._graph.get_all_edges():
-                if edge.source_memory_id:
-                    combined = (node_scores.get(edge.source_id, 0.0) + node_scores.get(edge.target_id, 0.0)) / 2
-                    self._pagerank_cache[edge.source_memory_id] = max(
-                        self._pagerank_cache.get(edge.source_memory_id, 0.0), combined)
-            self._pagerank_stale = False
-            logger.debug("PageRank refreshed: {} memory entries scored", len(self._pagerank_cache))
-        except Exception:
-            logger.warning("PageRank computation failed, using empty cache")
-            self._pagerank_stale = False

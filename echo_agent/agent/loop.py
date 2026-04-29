@@ -287,7 +287,8 @@ class AgentLoop:
 
         self._working_memories: OrderedDict[str, Any] = OrderedDict()
         self._hybrid_retriever = None
-        self._prefetcher = None
+        self._vector_index = None
+        self._embed_fn = None
         if config.memory.enabled:
             self._init_advanced_memory(config, storage)
 
@@ -367,8 +368,8 @@ class AgentLoop:
             self.tools.register(tool)
 
     def _init_advanced_memory(self, config: Config, storage: Any) -> None:
-        """初始化高级记忆子系统：四层记忆、向量索引、知识图谱、混合检索、预测预取。"""
-        from echo_agent.memory.tiers import WorkingMemory, EpisodicManager, SemanticManager, ArchivalManager
+        """初始化高级记忆子系统：分层记忆、向量索引、混合检索、矛盾检测。"""
+        from echo_agent.memory.tiers import EpisodicManager, SemanticManager, ArchivalManager
         from echo_agent.memory.retrieval import HybridRetriever
 
         forgetting = self.memory.forgetting_curve
@@ -389,33 +390,33 @@ class AgentLoop:
             vector_index = VectorIndex(storage, dimensions=config.memory.vector_dimensions)
             self.memory.set_vector_index(vector_index)
 
-        graph = None
-        if config.memory.graph_enabled and storage:
-            from echo_agent.memory.graph import MemoryGraph
-            graph = MemoryGraph(storage)
-            self.memory.set_graph(graph)
+            from echo_agent.models.provider import LLMProvider
+            if hasattr(self.provider, "embed") and type(self.provider).embed is not LLMProvider.embed:
+                emb_model = config.memory.embedding_model or None
+                async def _embed(text: str, _model=emb_model) -> list[float]:
+                    result = await self.provider.embed(text, model=_model)
+                    return result or []
+                embed_fn = _embed
+
+        self._vector_index = vector_index
+        self._embed_fn = embed_fn
+        self.memory.set_embed_fn(embed_fn)
 
         if config.memory.contradiction_detection and storage:
             from echo_agent.memory.contradiction import ContradictionDetector
             detector = ContradictionDetector(storage, vector_index)
             self.consolidator.set_contradiction_detector(detector)
 
-        entries_fn = lambda: list(self.memory._entries.values())
+        def entries_fn() -> list:
+            return list(self.memory._entries.values())
+
         self._hybrid_retriever = HybridRetriever(
             entries_fn=entries_fn,
             vector_index=vector_index,
-            graph=graph,
             forgetting=forgetting,
             embed_fn=embed_fn,
         )
         self.memory.set_retriever(self._hybrid_retriever)
-
-        if config.memory.prefetch_enabled:
-            from echo_agent.memory.prefetch import PredictivePrefetch
-            self._prefetcher = PredictivePrefetch(
-                retriever=self._hybrid_retriever,
-                llm_call=self.provider.chat_with_retry,
-            )
 
     def _setup_multi_agent(self) -> None:
         if not self.config.multi_agent.enabled:
@@ -449,6 +450,8 @@ class AgentLoop:
 
     async def start(self) -> None:
         self._running = True
+        if self._vector_index is not None:
+            await self._vector_index.initialize()
         await self._start_mcp()
         self.bus.subscribe_inbound(self._on_inbound)
         logger.info("Agent loop started")
@@ -529,7 +532,7 @@ class AgentLoop:
             _ProcessResult: 包含响应文本和发送状态
         """
         session = await self.sessions.get_or_create(event.session_key)
-        if event.session_key not in self._working_memories and self._prefetcher:
+        if event.session_key not in self._working_memories:
             from echo_agent.memory.tiers import WorkingMemory
             self._lru_put(self._working_memories, event.session_key, WorkingMemory(
                 max_entries=self.config.memory.max_working_memory
@@ -553,17 +556,8 @@ class AgentLoop:
             await stream_publisher.start()
 
         working_ctx = ""
-        if self._prefetcher and event.session_key in self._working_memories:
-            wm = self._working_memories[event.session_key]
-            try:
-                await self._prefetcher.prefetch(
-                    recent_messages=session.get_history(5),
-                    working_memory=wm,
-                    session_key=event.session_key,
-                )
-                working_ctx = wm.get_context()
-            except Exception as e:
-                logger.debug("Prefetch failed: {}", e)
+        if event.session_key in self._working_memories:
+            working_ctx = self._working_memories[event.session_key].get_context()
 
         if self._snapshot_enabled:
             if event.session_key not in self._memory_snapshots:
@@ -587,7 +581,12 @@ class AgentLoop:
 
         retrieval_parts: list[str] = []
         if self.config.memory.enabled:
-            scored = self.memory.search_scored(event.text, limit=5, session_key=event.session_key)
+            if self._hybrid_retriever:
+                scored = await self._hybrid_retriever.retrieve(
+                    event.text, limit=5, session_key=event.session_key,
+                )
+            else:
+                scored = self.memory.search_scored(event.text, limit=5, session_key=event.session_key)
             if scored:
                 retrieval_parts.append("Relevant memory:\n" + "\n".join(f"- {r.key}: {r.content}" for r, _ in scored))
 
@@ -833,6 +832,9 @@ class AgentLoop:
 
         session.add_message("assistant", response_text)
         await self.sessions.save(session)
+
+        if self.memory._pending_embeds:
+            self._spawn_background(self.memory.flush_pending_embeds())
 
         if self.consolidator.should_consolidate(session.message_count, session.last_consolidated):
             self._spawn_background(self._consolidate(session))

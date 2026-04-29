@@ -124,11 +124,12 @@ class MemoryConsolidator:
         """Sleep-time consolidation pipeline:
         1. Create episode from messages
         2. Extract semantic facts and promote
-        3. Run contradiction detection
+        3. Run heuristic contradiction detection on promoted entries
         4. Run forgetting/archival pass
         Returns stats dict.
         """
         stats = {"episodes": 0, "promoted": 0, "contradictions": 0, "archived": 0, "forgotten": 0}
+        promoted: list = []
 
         # Step 1: Create episode
         if self._episodic_manager and messages:
@@ -165,7 +166,20 @@ class MemoryConsolidator:
                     except Exception as e:
                         logger.warning("Fact extraction failed: {}", e)
 
-        # Step 3: Run forgetting pass
+        # Step 3: Run heuristic contradiction detection on newly promoted entries
+        if self._contradiction_detector and promoted:
+            try:
+                all_entries = list(self.store._entries.values())
+                for new_entry in promoted:
+                    others = [e for e in all_entries if e.id != new_entry.id]
+                    contradictions = await self._contradiction_detector.check(new_entry, others)
+                    for c in contradictions:
+                        await self._contradiction_detector.store_contradiction(c)
+                        stats["contradictions"] += 1
+            except Exception as e:
+                logger.warning("Contradiction detection failed: {}", e)
+
+        # Step 4: Run forgetting pass
         if self._forgetting_curve:
             all_entries = list(self.store._entries.values())
             to_archive, to_forget = await self._forgetting_curve.run_decay_pass(all_entries)

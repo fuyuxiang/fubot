@@ -100,6 +100,10 @@ class LLMProvider(ABC):
     def get_default_model(self) -> str:
         """Return the default model identifier."""
 
+    async def embed(self, text: str, model: str | None = None) -> list[float] | None:
+        """Generate an embedding vector for *text*. Returns None when unsupported."""
+        return None
+
     async def chat_stream(
         self,
         messages: list[dict[str, Any]],

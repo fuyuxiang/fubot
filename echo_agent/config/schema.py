@@ -310,17 +310,15 @@ class SessionConfig(_Base):
 class MemoryConfig(_Base):
     enabled: bool = True
     consolidation_threshold: int = 50
-    vector_enabled: bool = False
+    vector_enabled: bool = True
     vector_dimensions: int = 1536
     max_user_memories: int = 1000
     max_env_memories: int = 500
     memory_nudge_interval: int = 15
     importance_decay_days: float = 30.0
     snapshot_enabled: bool = True
-    graph_enabled: bool = False
     hybrid_retrieval: bool = True
-    prefetch_enabled: bool = False
-    contradiction_detection: bool = False
+    contradiction_detection: bool = True
     adaptive_forgetting: bool = True
     sleep_consolidation: bool = True
     archival_threshold: float = 0.05

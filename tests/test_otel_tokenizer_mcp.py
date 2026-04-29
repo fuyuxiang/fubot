@@ -469,10 +469,9 @@ class TestConfigDefaults:
     def test_memory_config_new_fields(self):
         from echo_agent.config.schema import MemoryConfig
         m = MemoryConfig()
-        assert m.graph_enabled is False
         assert m.hybrid_retrieval is True
-        assert m.prefetch_enabled is False
-        assert m.contradiction_detection is False
+        assert m.contradiction_detection is True
+        assert m.vector_enabled is True
         assert m.adaptive_forgetting is True
         assert m.sleep_consolidation is True
         assert m.archival_threshold == 0.05

@@ -92,7 +92,7 @@ class ContradictionDetector:
     async def store_contradiction(self, contradiction: Contradiction) -> None:
         """Persist contradiction to storage."""
         await self._storage.execute_sql(
-            "INSERT OR REPLACE INTO contradictions "
+            "INSERT OR REPLACE INTO memory_contradictions"
             "(id, memory_id_a, memory_id_b, description, resolution, resolved_at, created_at) "
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
             (
@@ -116,14 +116,14 @@ class ContradictionDetector:
         """Resolve a contradiction. resolution: 'a_wins', 'b_wins', 'merged', 'user_decided'."""
         now = datetime.now().isoformat()
         await self._storage.execute_sql(
-            "UPDATE contradictions SET resolution = ?, resolved_at = ? WHERE id = ?",
+            "UPDATE memory_contradictions SET resolution = ?, resolved_at = ? WHERE id = ?",
             (resolution, now, contradiction_id),
         )
         logger.info("Resolved contradiction {} as '{}'", contradiction_id, resolution)
 
         if winner_id and resolution in ("a_wins", "b_wins"):
             rows = await self._storage.fetch_sql(
-                "SELECT memory_id_a, memory_id_b FROM contradictions WHERE id = ?",
+                "SELECT memory_id_a, memory_id_b FROM memory_contradictions WHERE id = ?",
                 (contradiction_id,),
             )
             if rows:
@@ -139,7 +139,7 @@ class ContradictionDetector:
     async def get_unresolved(self, limit: int = 10) -> list[Contradiction]:
         """Get unresolved contradictions."""
         rows = await self._storage.fetch_sql(
-            "SELECT * FROM contradictions WHERE resolution IS NULL "
+            "SELECT * FROM memory_contradictions WHERE resolution IS NULL "
             "ORDER BY created_at DESC LIMIT ?",
             (limit,),
         )
@@ -148,7 +148,7 @@ class ContradictionDetector:
     async def get_history(self, memory_id: str) -> list[Contradiction]:
         """Get all contradictions involving a memory."""
         rows = await self._storage.fetch_sql(
-            "SELECT * FROM contradictions "
+            "SELECT * FROM memory_contradictions "
             "WHERE memory_id_a = ? OR memory_id_b = ? "
             "ORDER BY created_at DESC",
             (memory_id, memory_id),

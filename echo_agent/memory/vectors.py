@@ -32,6 +32,7 @@ class VectorIndex:
         self._dimensions = dimensions
         self._index: Any | None = None
         self._id_map: list[str] = []
+        self._source_map: list[str] = []
         self._initialized = False
 
     @property
@@ -54,12 +55,14 @@ class VectorIndex:
             embeddings = []
             for row in rows:
                 vec_id = row["id"]
+                source_id = row.get("source_id", "")
                 emb = row.get("embedding")
                 if emb is not None:
                     arr = np.frombuffer(emb, dtype=np.float32)
                     if arr.shape[0] == self._dimensions:
                         embeddings.append(arr)
                         self._id_map.append(vec_id)
+                        self._source_map.append(source_id)
             if embeddings:
                 matrix = np.vstack(embeddings).astype(np.float32)
                 faiss.normalize_L2(matrix)
@@ -78,9 +81,11 @@ class VectorIndex:
             faiss.normalize_L2(arr)
             self._index.add(arr)
             self._id_map.append(vec_id)
+            self._source_map.append(memory_id)
         return vec_id
 
     async def search(self, query_embedding: list[float], limit: int = 10) -> list[tuple[str, float]]:
+        """Search for similar vectors. Returns (source_id, score) pairs."""
         if self._index is None or self._index.ntotal == 0:
             return []
         arr = np.array(query_embedding, dtype=np.float32).reshape(1, -1)
@@ -91,9 +96,9 @@ class VectorIndex:
         scores, indices = self._index.search(arr, k)
         results: list[tuple[str, float]] = []
         for score, idx in zip(scores[0], indices[0]):
-            if idx < 0 or idx >= len(self._id_map):
+            if idx < 0 or idx >= len(self._source_map):
                 continue
-            results.append((self._id_map[idx], float(score)))
+            results.append((self._source_map[idx], float(score)))
         return results
 
     async def remove(self, vec_id: str) -> None:
@@ -103,6 +108,7 @@ class VectorIndex:
 
     async def rebuild(self) -> None:
         self._id_map.clear()
+        self._source_map.clear()
         if self._index is not None:
             self._index.reset()
         await self.initialize()

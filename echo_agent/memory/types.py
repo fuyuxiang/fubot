@@ -139,65 +139,6 @@ class Episode:
             created_at=data.get("created_at", ""),
         )
 
-
-@dataclass
-class GraphNode:
-    id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
-    label: str = ""
-    node_type: str = "concept"
-    properties: dict[str, Any] = field(default_factory=dict)
-    created_at: str = field(default_factory=lambda: datetime.now().isoformat())
-    updated_at: str = field(default_factory=lambda: datetime.now().isoformat())
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "id": self.id, "label": self.label, "node_type": self.node_type,
-            "properties": self.properties,
-            "created_at": self.created_at, "updated_at": self.updated_at,
-        }
-
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> GraphNode:
-        return cls(
-            id=data.get("id", ""), label=data.get("label", ""),
-            node_type=data.get("node_type", "concept"),
-            properties=data.get("properties", {}),
-            created_at=data.get("created_at", ""), updated_at=data.get("updated_at", ""),
-        )
-
-
-@dataclass
-class GraphEdge:
-    id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
-    source_id: str = ""
-    target_id: str = ""
-    relation: str = ""
-    weight: float = 1.0
-    valid_from: str | None = None
-    valid_to: str | None = None
-    source_memory_id: str | None = None
-    created_at: str = field(default_factory=lambda: datetime.now().isoformat())
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "id": self.id, "source_id": self.source_id, "target_id": self.target_id,
-            "relation": self.relation, "weight": self.weight,
-            "valid_from": self.valid_from, "valid_to": self.valid_to,
-            "source_memory_id": self.source_memory_id, "created_at": self.created_at,
-        }
-
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> GraphEdge:
-        return cls(
-            id=data.get("id", ""), source_id=data.get("source_id", ""),
-            target_id=data.get("target_id", ""), relation=data.get("relation", ""),
-            weight=data.get("weight", 1.0),
-            valid_from=data.get("valid_from"), valid_to=data.get("valid_to"),
-            source_memory_id=data.get("source_memory_id"),
-            created_at=data.get("created_at", ""),
-        )
-
-
 @dataclass
 class Contradiction:
     id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])

@@ -28,7 +28,7 @@
 <table>
 <tr><td><b>持续运行的 Agent 服务</b></td><td>CLI、消息通道、Webhook、计划任务和 Gateway API 共用同一个 Agent Loop。来自不同入口的请求进入统一的会话、记忆、工具和权限上下文。</td></tr>
 <tr><td><b>多平台消息接入</b></td><td>Telegram、Discord、Slack、WhatsApp、微信、QQ、飞书、钉钉、企业微信、Matrix、Email 等通道通过统一消息总线接入，支持从本地终端到云端常驻的部署方式。</td></tr>
-<tr><td><b>持久化上下文与技能</b></td><td>持久化用户偏好、环境事实、工作记忆和情节回忆；可选向量索引与知识图谱。技能以目录和 <code>SKILL.md</code> 形式沉淀，支持创建、安装和共享。</td></tr>
+<tr><td><b>持久化上下文与技能</b></td><td>四层记忆层级（Working → Episodic → Semantic → Archival），支持 BM25 + 向量混合检索、Ebbinghaus 自适应遗忘、矛盾检测与版本化信念修正、会话后自动整理。技能以目录和 <code>SKILL.md</code> 形式沉淀，支持创建、安装和共享。</td></tr>
 <tr><td><b>受控工具执行</b></td><td>内置文件、Shell、Web、视觉、TTS、MCP、知识检索、任务和工作流等 30+ 工具，并可从 MCP server 动态注册扩展工具。高风险操作由权限规则、管理员配置和审批流程统一约束。</td></tr>
 <tr><td><b>面向系统集成的 Gateway</b></td><td>提供 REST + WebSocket API，内置 Playground、会话管理、健康检查、认证（allowlist / pairing / token）和 A2A 协议入口。</td></tr>
 <tr><td><b>多 Agent 路由与并行执行</b></td><td>按任务类型路由到 general、planner、coder、researcher、knowledge、operator 等专用 Agent，支持调度审计、并行执行和长任务编排。</td></tr>
@@ -166,9 +166,55 @@ permissions:
 
 <!-- PLACEHOLDER_REST -->
 
-## 记忆与技能
+## 记忆
 
-**记忆**分为用户记忆和环境记忆：用户记忆记录偏好、习惯和个人上下文，环境记忆记录项目事实、工具配置和领域知识。系统支持工作记忆、情节回忆、语义检索、可选向量索引、可选知识图谱、矛盾检测和预测预取。
+Echo Agent 的记忆系统采用四层分级架构，在两类记忆（用户记忆 / 环境记忆）之上实现从短期到长期的完整生命周期管理。
+
+### 记忆分类
+
+| 类型 | 说明 |
+|------|------|
+| 用户记忆（user） | 偏好、习惯、沟通风格、个人上下文。按会话隔离，带 `global` 标签时跨会话可见 |
+| 环境记忆（environment） | 项目事实、工具配置、流程规则、领域知识。全局可见，不受会话隔离约束 |
+
+### 四层记忆层级
+
+| 层级 | 说明 |
+|------|------|
+| Working | 当前对话的进程内缓冲区，容量有限（默认 20 条），不持久化 |
+| Episodic | 对话片段的摘要记录，按会话和时间索引，持久化到 SQLite |
+| Semantic | 从情节中提炼的核心事实，是主要的持久化记忆层，支持 CRUD、关键词和向量检索 |
+| Archival | 重要性衰减到阈值以下的记忆自动归档，进一步衰减后清除 |
+
+### 检索
+
+混合检索管线（`HybridRetriever`）融合 BM25 关键词匹配和 FAISS 向量相似度，通过查询熵自适应调整权重（Resonance Scoring）：模糊查询偏向向量，精确查询偏向关键词。检索结果经遗忘曲线加权后返回。
+
+向量索引基于 FAISS（可选依赖），使用 SQLite 持久化 embedding，未安装 FAISS 时自动降级为纯关键词检索。
+
+### 遗忘与生命周期
+
+基于 Ebbinghaus 遗忘曲线的自适应衰减：`half_life = base × (1 + log₂(1 + access_count))`。访问次数越多，半衰期越长，遗忘越慢。有效重要性低于归档阈值时自动降级到 Archival 层；低于遗忘阈值时彻底清除。
+
+### 矛盾检测
+
+新记忆写入时，通过版本化记忆格（versioned memory lattice）检测与已有记忆的矛盾。支持 LLM 语义验证和启发式（同 key 不同内容）两种模式。矛盾不会被静默覆盖，而是作为时序边存储，支持信念修正和历史查询。
+
+### 会话后整理
+
+会话结束后，`MemoryConsolidator` 通过 LLM 将对话摘要写入 `HISTORY.md`，更新长期记忆 `MEMORY.md`。完整的 sleep-time 整理管线依次执行：创建情节 → 提取语义事实并提升 → 矛盾检测 → 遗忘/归档扫描。
+
+### 自动审查
+
+`MemoryReviewer` 在非平凡对话后自动运行，通过 LLM 判断是否需要持久化用户偏好、项目事实或经验教训，并执行 add / replace / remove 操作。
+
+### 安全
+
+所有写入记忆的内容经过注入扫描（prompt injection、角色劫持、凭证外泄等模式）和不可见 Unicode 字符检测。文件写入使用原子替换 + 跨平台文件锁，避免并发写入导致数据损坏。
+
+---
+
+## 技能
 
 **技能**采用目录 + `SKILL.md` 的开放格式。内置技能包括 `arxiv`、`weather`、`summarize`、`plan` 和 `skill-creator`。技能支持查看、创建、修改、删除，也可以从本地路径、Git 仓库或 URL 安装。
 
@@ -209,7 +255,7 @@ echo_agent/
 ├── config/         # 配置 schema、加载器、默认值
 ├── gateway/        # HTTP / WebSocket Gateway
 ├── mcp/            # MCP 客户端、传输层、OAuth
-├── memory/         # 记忆存储、检索、审查、图谱、向量
+├── memory/         # 四层记忆、混合检索、遗忘曲线、矛盾检测、向量索引
 ├── models/         # Provider、路由、凭证池
 ├── observability/  # 健康检查、Span、遥测
 ├── permissions/    # 权限和凭证原语
